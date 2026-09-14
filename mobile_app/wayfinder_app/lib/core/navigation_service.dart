@@ -3,7 +3,7 @@
 ///
 /// Starting position  : IP geolocation (no permissions needed)
 /// GNSS ON            : EKF fuses GNSS + IMU, PDR anchor = GPS position
-/// GNSS OFF (DR mode) : CNN-GRU speed model × compass heading propagates position
+/// GNSS OFF (DR mode) : speed held from GNSS-loss instant (+ZUPT) × compass heading propagates position
 /// GNSS reacquired    : smooth drift correction via EKF
 
 library;
@@ -18,9 +18,11 @@ import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'ekf_navigation.dart';
 import 'map_matcher.dart';
+import 'road_matcher.dart';
 import 'speed_estimator.dart';
 
 enum GnssStatus { active, denied, degraded }
@@ -58,11 +60,31 @@ class NavigationService extends ChangeNotifier {
   double _drAnchorLon = 77.5946;
   double _drAnchorHeadingRad = 0;
 
-  // ── ML Speed Estimator ────────────────────────────────────────────────────
+  // ── Speed estimation during GNSS outage ───────────────────────────────────
+  // NOTE (2026-09-15): the CNN-GRU speed estimator is NO LONGER in the
+  // navigation path. Measured on both the validation and test driver splits,
+  // holding the last known GPS speed and zeroing it via ZUPT beat the model
+  // on every metric — mean drift over moving 30s windows 23.7% vs 34.2%
+  // (val) / 33.3% vs 42.3% (test), median position error 34m vs 100m (val)
+  // / 43m vs 110m (test), and critically 3.5m vs 20m (val) / 31m vs 213m
+  // (test) of false movement while parked. See PROTOTYPE_STATUS.md.
+  // The model is left loaded but unused so it can be re-enabled if a future,
+  // much larger training set makes it competitive (see DATA_COLLECTION_PLAN.md).
   final SpeedEstimatorModel _speedModel = SpeedEstimatorModel();
-  double _mlSpeedMs = 0;    // last validated speed from ML (m/s)
+  double _mlSpeedMs = 0;       // speed currently driving DR (m/s) — also shown in UI
   double _mlVibrationScore = 0.0;
+  double _drHoldSpeedMs = 0;   // speed captured at the moment GNSS was lost
   DateTime? _lastFuseTime;
+
+  // ── OSM road aiding ───────────────────────────────────────────────────────
+  // Roads are fetched while GNSS is healthy and cached, so that during an
+  // outage the road bearing can supply an absolute heading reference. Heading
+  // — not speed — is what actually breaks DR (see road_matcher.dart).
+  final RoadMatcher _roads = RoadMatcher();
+  bool _roadAidActive = false;      // matched a road on the last DR tick
+  double _lastRoadSnapDistM = -1;
+  bool get roadAidActive => _roadAidActive;
+  int  get roadSegmentCount => _roads.segmentCount;
 
   // Alignment matrix (phone → vehicle frame), estimated online from GPS accel
   List<List<double>> _alignR = [[1,0,0],[0,1,0],[0,0,1]];
@@ -179,9 +201,17 @@ class NavigationService extends ChangeNotifier {
     if (_recordedRows.length <= 1) return; // only header
 
     try {
-      // Write to external files dir so it is accessible without root via ADB:
-      // adb pull /storage/emulated/0/Android/data/<package>/files/
-      final dir = Directory('/storage/emulated/0/Android/data/com.wayfinder.app/files');
+      // Write to the app's external files dir so recordings are retrievable via
+      //   adb pull /storage/emulated/0/Android/data/com.wayfinder.wayfinder_app/files/
+      //
+      // This previously hardcoded ".../com.wayfinder.app/files", which is a
+      // DIFFERENT package than this app's actual id
+      // (com.wayfinder.wayfinder_app, see android/app/build.gradle.kts). Under
+      // scoped storage an app cannot write into another package's data dir, so
+      // every recording failed into the catch below and was silently lost.
+      // getExternalStorageDirectory() resolves the correct per-package path.
+      final dir = await getExternalStorageDirectory()
+          ?? await getApplicationDocumentsDirectory();
       if (!await dir.exists()) await dir.create(recursive: true);
 
       final ts   = _recordingStartTime?.millisecondsSinceEpoch ?? DateTime.now().millisecondsSinceEpoch;
@@ -204,8 +234,15 @@ class NavigationService extends ChangeNotifier {
     initStatus = InitStatus.loading;
     notifyListeners();
 
-    // Load ML model in parallel
-    _speedModel.load().then((_) => notifyListeners());
+    // NOTE: the CNN-GRU model is deliberately NOT loaded any more. It is no
+    // longer in the navigation path (see the field declaration above), and its
+    // weights were never declared under `assets:` in pubspec.yaml, so this
+    // call always threw an unhandled async error at startup anyway.
+    // To re-enable it you must BOTH restore this call AND add
+    //   assets:
+    //     - assets/model_weights.json
+    //     - assets/norm_stats.json
+    // to pubspec.yaml — otherwise rootBundle.loadString will keep failing.
 
     // IP Geolocation
     double lat = 12.9716, lon = 77.5946;
@@ -253,6 +290,7 @@ class NavigationService extends ChangeNotifier {
     // Reset all navigation state to prevent stale data from previous session
     _mlSpeedMs = 0;
     _mlVibrationScore = 0;
+    _drHoldSpeedMs = 0;
     _lastFuseTime = null;
     _motionAccelMags.clear();
     _stationaryTicks = 0;
@@ -303,6 +341,7 @@ class NavigationService extends ChangeNotifier {
     _movingTicks = 0;
     _confirmedStationary = true;
     _mlSpeedMs = 0;
+    _drHoldSpeedMs = 0;
     _lastFuseTime = null;
     notifyListeners();
   }
@@ -334,13 +373,16 @@ class NavigationService extends ChangeNotifier {
     _motionAccelMags.add(aMag);
     if (_motionAccelMags.length > _motionBufSize) _motionAccelMags.removeAt(0);
 
-    // Push IMU sample into ML model window (aligned to vehicle frame)
-    if (_speedModel.isLoaded) {
-      final va = _rotateVec([_ax, _ay, _az], _alignR);
-      final vg = _rotateVec([_gx, _gy, _gz], _alignR);
-      _vehYawRate = _gz; // raw phone Z gyro for yaw rate
-      _speedModel.pushSample(va[0], va[1], va[2], vg[0], vg[1], vg[2]);
-    }
+    // Yaw rate for the EKF heading propagation. MUST be updated on every
+    // accelerometer event, unconditionally.
+    //
+    // This was previously nested inside `if (_speedModel.isLoaded)`, together
+    // with the (now removed) ML sample push. The model's weights were never
+    // declared as assets in pubspec.yaml, so it never loaded, so this line
+    // never ran and _vehYawRate stayed 0 for the entire session — meaning the
+    // EKF's gyro heading propagation was dead and heading came only from the
+    // compass complementary term. See PROTOTYPE_STATUS.md.
+    _vehYawRate = _gz; // raw phone Z gyro for yaw rate
 
     if (navMode == NavMode.walking && _running) _detectStep();
   }
@@ -488,6 +530,16 @@ class NavigationService extends ChangeNotifier {
       if (!_alignDone && _alignAccelBuf.length >= 200) {
         _estimateAlignment(p.speed);
       }
+
+      // Prefetch the surrounding road network WHILE GNSS is healthy, so that
+      // road-based heading aiding still works once the signal drops (the
+      // outage is exactly when we cannot download anything). Refreshes only
+      // after the vehicle has moved well beyond the cached box.
+      if (_roads.needsRefresh(p.latitude, p.longitude)) {
+        _roads.loadAround(p.latitude, p.longitude).then((ok) {
+          if (ok) notifyListeners();
+        });
+      }
     }
 
     // Reacquisition after DR: correct EKF drift
@@ -511,6 +563,15 @@ class NavigationService extends ChangeNotifier {
     _drAnchorLat = pdrLat;
     _drAnchorLon = pdrLon;
     _drAnchorHeadingRad = _compassRad;
+
+    // Capture the speed we were travelling at the instant GNSS was lost.
+    // This is the seed for dead reckoning: a 30s outage is a bounded
+    // velocity-propagation problem from a KNOWN initial speed, not an
+    // absolute-speed-inference problem. Prefer the EKF's filtered speed
+    // over the raw GPS sample (less noise); fall back to raw GPS.
+    final seed = _ekf?.speedMs ?? _gpsSpeed;
+    _drHoldSpeedMs = seed.isFinite ? seed.clamp(0.0, 55.0) : 0.0;
+
     drPhase = DrPhase.deadReckoning;
   }
 
@@ -581,6 +642,17 @@ class NavigationService extends ChangeNotifier {
 
     final gnssOn = _hasGps && !gnssSimDenied && gnssStatus == GnssStatus.active;
 
+    // Catch-all entry into dead reckoning. The timeout check above only fires
+    // when gnssStatus is *active*, so a fix that DEGRADES (accuracy >= 25m)
+    // rather than disappearing would drop us into the DR branch below without
+    // ever capturing the speed DR now depends on — leaving the marker frozen
+    // at 0, or worse, running on a hold speed from a previous outage.
+    // Capturing here covers every route into DR, and is self-limiting because
+    // _captureGnssAnchor() sets drPhase = deadReckoning.
+    if (!gnssOn && drPhase != DrPhase.deadReckoning) {
+      _captureGnssAnchor();
+    }
+
     // ── Step 1: Always update motion state from raw IMU ─────────────────────
     // This uses _motionAccelMags which is filled in _onAccel regardless of GNSS.
     _updateMotionState();
@@ -601,6 +673,11 @@ class NavigationService extends ChangeNotifier {
           // Only predict heading (zero velocity predict):
           _ekf!.predict(dt, _vehYawRate);
         } else {
+          // Keep the displayed speed live while GNSS is driving the filter.
+          // Previously _mlSpeedMs was only ever written in the DR path (and
+          // zeroed when stationary), so the on-screen speedometer read 0 the
+          // whole time the vehicle was navigating normally on GPS.
+          _mlSpeedMs = _ekf!.speedMs;
           _ekf!.predict(dt, _vehYawRate);
         }
         _ekf!.updateNhc();
@@ -609,7 +686,8 @@ class NavigationService extends ChangeNotifier {
         // ── DR (GNSS-denied) path ────────────────────────────────────────
         //
         // ARCHITECTURE:
-        //   1. Determine validated speed FIRST from ML or stationary gate
+        //   1. Determine validated speed FIRST (held GNSS-loss speed, or 0
+        //      if the IMU-based stationary detector says we're stopped)
         //   2. Apply ZUPT if stationary (corrects EKF internal velocity to 0)
         //   3. THEN call predict() using the validated speed in EKF state
         //   4. Position only changes if the validated speed is non-zero
@@ -621,51 +699,75 @@ class NavigationService extends ChangeNotifier {
         if (_confirmedStationary) {
           // Vehicle is confirmed stopped — force speed to zero and correct EKF.
           // Apply ZUPT BEFORE predict so that predict integrates v=0.
+          // This is the single most valuable constraint in the DR path: it is
+          // what stops the marker creeping while parked at a light, and it
+          // needs no model — only accelerometer variance + gyro magnitude.
           _ekf!.updateZupt();
           _mlSpeedMs = 0;
           validatedSpeed = 0.0;
           speedVariance = 0.01; // tight: we are very sure it's stopped
         } else {
-          // Vehicle is moving — get speed from ML model
-          if (!_alignDone) {
-            // Safety Gate: AI Model will hallucinate if alignment is missing.
-            // Force zero speed (or fallback) until alignment matrix is estimated.
-            validatedSpeed = 0.0;
-            speedVariance = 2.0;
-            _mlSpeedMs = 0.0;
-          } else {
-            final mlOut = _speedModel.predictSpeed();
-            if (mlOut != null) {
-              // ML has a fresh window
-              validatedSpeed = mlOut.speed.clamp(0.0, 55.0); // max 55 m/s ≈ 200 km/h
-              speedVariance = mlOut.variance.clamp(0.01, 4.0);
-              _mlSpeedMs = validatedSpeed;
-              _mlVibrationScore = mlOut.vibrationScore;
-            } else {
-              // ML buffer warming up (first 5s after GNSS loss).
-              // Decay the last known speed rapidly — do NOT hold stale velocity.
-              // Decay to zero in ~5 seconds: 0.98^50 ≈ 0.36, 0.95^50 ≈ 0.08
-              _mlSpeedMs = _mlSpeedMs * 0.95;
-              if (_mlSpeedMs < 0.3) _mlSpeedMs = 0.0; // hard zero below 0.3 m/s
-              validatedSpeed = _mlSpeedMs;
-              speedVariance = 2.0; // high uncertainty during warmup
-            }
-          }
+          // Vehicle is moving — propagate the speed we had when GNSS dropped.
+          //
+          // Over a bounded (~30s) outage this beats inferring absolute speed
+          // from IMU vibration, because the initial speed is KNOWN exactly
+          // from GPS at outage onset. Accelerometer integration was also
+          // tried and measured worse (bias leakage compounds over 30s:
+          // 43.8% vs 33.3% mean drift on test), so the forward accelerometer
+          // is deliberately NOT integrated here.
+          //
+          // Unlike the old ML path this has no dependency on _alignDone, so
+          // dead reckoning now works immediately on GNSS loss instead of
+          // freezing the marker whenever phone→vehicle alignment had not yet
+          // converged.
+          validatedSpeed = _drHoldSpeedMs;
+          _mlSpeedMs = validatedSpeed;
+          // Moderate confidence: right at outage onset this is essentially a
+          // GPS measurement, but it goes stale as the vehicle accelerates or
+          // brakes, so don't let the EKF lock onto it as hard as a ZUPT.
+          speedVariance = 1.0;
         }
 
         // ── Step 3: Feed validated speed into EKF as measurement ─────────
         // This corrects the EKF internal speed state before predict().
         _ekf!.updateSpeed(validatedSpeed, variance: speedVariance);
 
+        // ── Step 3b: OSM road aiding ──────────────────────────────────────
+        // The road network gives an ABSOLUTE heading reference (~1 deg in
+        // replay testing) to replace gyro/compass heading (~25 deg error),
+        // and snapping removes cross-track error. Only while moving — a
+        // stationary vehicle must not be dragged along a road.
+        _roadAidActive = false;
+        if (!_confirmedStationary) {
+          final s0 = _ekf!.state;
+          final m = _roads.match(s0.lat, s0.lon, s0.heading);
+          if (m != null) {
+            _roadAidActive = true;
+            _lastRoadSnapDistM = m.distanceM;
+            _ekf!.updateHeading(m.bearingRad, variance: 0.02);
+            // Lateral snap. The projection is perpendicular to the road, so
+            // this corrects cross-track error without inventing along-track
+            // progress — distance travelled still comes from DR.
+            _ekf!.updateGnss(m.lat, m.lon);
+          }
+        }
+
         // ── Step 4: Complementary heading correction ──────────────────────
         // Gently pull gyro-derived yaw rate towards compass absolute heading.
-        // This prevents heading drift without injecting compass noise into
-        // the position covariance matrix.
-        double hErr = _compassRad - _ekf!.state.heading;
-        while (hErr >  math.pi) hErr -= 2 * math.pi;
-        while (hErr < -math.pi) hErr += 2 * math.pi;
-        // Proportional gain 0.5 rad/s per rad error (soft pull, not hard lock)
-        final correctedYawRate = _vehYawRate + hErr * 0.5;
+        //
+        // SKIPPED when a road match is active: the road bearing is far more
+        // accurate than an in-car compass, and applying both makes things
+        // WORSE, not better — measured in replay, the compass term dragged
+        // the heading straight back off the road (187 m vs 173 m error).
+        // Road wins when available; compass is the fallback.
+        double correctedYawRate = _vehYawRate;
+        if (!_roadAidActive) {
+          double hErr = _compassRad - _ekf!.state.heading;
+          while (hErr >  math.pi) hErr -= 2 * math.pi;
+          while (hErr < -math.pi) hErr += 2 * math.pi;
+          // Proportional gain 0.5 rad/s per rad error (soft pull, not hard lock)
+          correctedYawRate = _vehYawRate + hErr * 0.5;
+        }
 
         // ── Step 5: Predict — EKF state speed is now validated ────────────
         // predict() uses the speed already in _x[3] (corrected by updateSpeed
@@ -729,9 +831,10 @@ class NavigationService extends ChangeNotifier {
         print("[DRIVE_TRACE] timestamp: ${DateTime.now().toIso8601String()}");
         print("[DRIVE_TRACE] raw accelerometer: [$_ax, $_ay, $_az]");
         print("[DRIVE_TRACE] raw gyroscope: [$_gx, $_gy, $_gz]");
-        print("[DRIVE_TRACE] CNN-GRU velocity: $_mlSpeedMs m/s");
-        print("[DRIVE_TRACE] CNN-GRU uncertainty: $speedVariance");
+        print("[DRIVE_TRACE] DR held velocity: $_mlSpeedMs m/s (hold-at-GNSS-loss: $_drHoldSpeedMs)");
+        print("[DRIVE_TRACE] speed variance: $speedVariance");
         print("[DRIVE_TRACE] stationary detector: $_confirmedStationary (raw: $_stationaryTicks/$_stationaryThresh)");
+        print("[DRIVE_TRACE] road aid: ${_roadAidActive ? 'MATCHED' : 'none'} (snap ${_lastRoadSnapDistM.toStringAsFixed(1)}m, ${_roads.segmentCount} segs cached)");
         print("[DRIVE_TRACE] ZUPT state: ${_confirmedStationary ? 'APPLIED' : 'NOT_APPLIED'}");
         print("[DRIVE_TRACE] EKF velocity: ${_ekf!.state.speed} m/s");
         print("[DRIVE_TRACE] DR velocity: $validatedSpeed m/s");
