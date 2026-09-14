@@ -1,0 +1,54 @@
+name: wayfinder_app
+description: WayFinder — AI-Enhanced IDR Navigation System
+
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: '>=3.10.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Sensors
+  sensors_plus: ^6.0.0
+
+  # GPS / Location
+  geolocator: ^13.0.0
+
+  # Map rendering
+  flutter_map: ^8.1.0
+  latlong2: ^0.9.0
+
+  # State management
+  provider: ^6.1.2
+
+  # Local storage
+  shared_preferences: ^2.3.2
+
+  # Charts
+  fl_chart: ^0.70.2
+
+  # Icons
+  cupertino_icons: ^1.0.8
+
+  # Permissions
+  permission_handler: ^11.3.1
+
+  # HTTP for tiles
+  http: ^1.2.2
+  path_provider: ^2.1.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/model_weights.json
+    - assets/norm_stats.json

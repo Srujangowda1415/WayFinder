@@ -1,0 +1,103 @@
+{
+  "phase": 3,
+  "method": "Classical INS (odometry + yaw rate)",
+  "yaw_sign": -1.0,
+  "sequences": [
+    {
+      "sequence": "S1",
+      "driver": "S (Driver A)",
+      "dist_km": 38.04820004162901,
+      "final_error_m": 3505.948643180445,
+      "mean_error_m": 1868.50605805892,
+      "max_error_m": 3710.2125039438156,
+      "rmse_m": 1984.035982926409,
+      "drift_pct": 9.214492773231171
+    },
+    {
+      "sequence": "S2",
+      "driver": "S (Driver A)",
+      "dist_km": 75.52720602547642,
+      "final_error_m": 40634.992578823825,
+      "mean_error_m": 17903.85714517991,
+      "max_error_m": 41580.75702972626,
+      "rmse_m": 23441.458084304173,
+      "drift_pct": 53.801795031471244
+    },
+    {
+      "sequence": "S3a",
+      "driver": "S (Driver A)",
+      "dist_km": 25.9101970405501,
+      "final_error_m": 1768.5735284272089,
+      "mean_error_m": 1220.825990175631,
+      "max_error_m": 1898.5546488750379,
+      "rmse_m": 1358.040871430043,
+      "drift_pct": 6.825781855920847
+    },
+    {
+      "sequence": "S3b",
+      "driver": "S (Driver A)",
+      "dist_km": 3.765214627239272,
+      "final_error_m": 287.2803917068062,
+      "mean_error_m": 120.91460433975097,
+      "max_error_m": 287.2803917068062,
+      "rmse_m": 142.25653819527477,
+      "drift_pct": 7.629854341595547
+    },
+    {
+      "sequence": "S3c",
+      "driver": "S (Driver A)",
+      "dist_km": 44.161265143748615,
+      "final_error_m": 29423.5312282022,
+      "mean_error_m": 19490.035089949513,
+      "max_error_m": 32257.715900835407,
+      "rmse_m": 23408.250008374394,
+      "drift_pct": 66.62746443614363
+    },
+    {
+      "sequence": "S4",
+      "driver": "S (Driver A)",
+      "dist_km": 88.41813599537922,
+      "final_error_m": 13541.268611856634,
+      "mean_error_m": 8066.858275570676,
+      "max_error_m": 21700.070149668943,
+      "rmse_m": 9790.231151148051,
+      "drift_pct": 15.315035155869278
+    },
+    {
+      "sequence": "V-Vfa01",
+      "driver": "Vf (Driver E)",
+      "dist_km": 18.782763824086704,
+      "final_error_m": 20950.862576217638,
+      "mean_error_m": 9390.452316916297,
+      "max_error_m": 20950.862576217638,
+      "rmse_m": 11945.324327561668,
+      "drift_pct": 111.54302302066216
+    },
+    {
+      "sequence": "V-Vfa02",
+      "driver": "Vf (Driver E)",
+      "dist_km": 163.9045162723317,
+      "final_error_m": 145837.78277287388,
+      "mean_error_m": 95574.48342767758,
+      "max_error_m": 146001.37080889393,
+      "rmse_m": 106281.00783833391,
+      "drift_pct": 88.97728146219018
+    },
+    {
+      "sequence": "Y1",
+      "driver": "Y (Driver D)",
+      "dist_km": 60.746519165294124,
+      "final_error_m": 3768.90576459744,
+      "mean_error_m": 6097.649238437221,
+      "max_error_m": 9898.154420707464,
+      "rmse_m": 6813.26817366803,
+      "drift_pct": 6.204315599289025
+    }
+  ],
+  "aggregate": {
+    "mean_drift_pct": 40.68211596404146,
+    "mean_final_error_m": 28857.682899542895,
+    "mean_rmse_m": 20573.76366399355
+  },
+  "sih_target_10pct_pass_rate": "4/9"
+}

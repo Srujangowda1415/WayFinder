@@ -1,0 +1,9 @@
+{
+  "phase": 6,
+  "method": "CNN-GRU Speed Estimator",
+  "val_rmse_ms": 9.03335952758789,
+  "val_mae_ms": 7.204220294952393,
+  "val_rmse_kmh": 32.520094299316405,
+  "val_mae_kmh": 25.935193061828613,
+  "model_size_mb": 0.03563404083251953
+}
