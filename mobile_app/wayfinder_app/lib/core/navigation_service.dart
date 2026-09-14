@@ -847,9 +847,35 @@ class NavigationService extends ChangeNotifier {
       }
 
     } else {
-      // ── WALKING MODE — unchanged ─────────────────────────────────────────
+      // ── WALKING MODE ─────────────────────────────────────────────────────
       _ekf!.predict(dt, _gz);
       _ekf!.updateSpeed(0, variance: 0.5);
+
+      // Anchor to GNSS while it is healthy.
+      //
+      // Previously pdrLat/pdrLon were set once on the first GPS fix and then
+      // ONLY moved by _detectStep() — step-count dead reckoning with a fixed
+      // 0.75 m stride along the compass heading. GPS never corrected them
+      // again, so walk mode was accurate for the first few seconds and then
+      // drifted away with nothing pulling it back. (The vehicle branch has
+      // re-anchored via EMA at step 8 all along; walking simply never got the
+      // equivalent.)
+      //
+      // Step-based PDR still carries position when GNSS drops — that is the
+      // whole point of it — but it must not fight a good GPS fix.
+      if (gnssOn) {
+        final offsetM = _dist(pdrLat, pdrLon, _gpsLat, _gpsLon);
+        if (offsetM > 25) {
+          // Badly diverged (or first re-acquisition): snap rather than crawl.
+          pdrLat = _gpsLat;
+          pdrLon = _gpsLon;
+        } else {
+          // Gentle pull so the marker tracks the walker without jittering on
+          // GPS noise, which at walking speed is comparable to the motion.
+          pdrLat = pdrLat * 0.80 + _gpsLat * 0.20;
+          pdrLon = pdrLon * 0.80 + _gpsLon * 0.20;
+        }
+      }
 
       currentState = NavState(
         x: _ekf!.state.x, y: _ekf!.state.y,
