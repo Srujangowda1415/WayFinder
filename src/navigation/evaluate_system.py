@@ -62,14 +62,47 @@ for seq in test_seqs:
     res_ekf = run_ekf_fusion(vdf, gnss_available_mask=None, use_nhc=True, use_zupt=True)
 
     # ── Method 3: EKF + GNSS denial (simulate tunnel/underpass) ──────────────
-    # Simulate 30-second GNSS outage at 25% into the trajectory
-    outage_start = times[0] + duration * 0.25
-    outage_end = outage_start + 30.0  # 30 seconds
-    res_ekf_denied = run_ekf_fusion(
-        vdf, use_nhc=True, use_zupt=True,
-        gnss_denied_segment=(outage_start, outage_end),
-        ai_speeds=ai_speeds
-    )
+    # Average over MULTIPLE outage windows per sequence, not one fixed
+    # window at 25% into the trip. A single fixed window makes the result
+    # highly sensitive to whatever that one 30s slice happens to contain
+    # (e.g. a stop, a turn) — verified empirically: re-running the exact
+    # same model config (no code change) swung the single-window mean drift
+    # from 53.8% to 61.7% purely from training-sampler randomness. Averaging
+    # several windows per sequence doesn't remove training-run variance, but
+    # gives a per-sequence number that isn't dominated by one lucky/unlucky
+    # slice, so model comparisons are more trustworthy.
+    OUTAGE_FRACTIONS = [0.15, 0.30, 0.45, 0.60, 0.75]
+    outage_len = 30.0
+    window_results = []
+    for frac in OUTAGE_FRACTIONS:
+        outage_start = times[0] + duration * frac
+        outage_end = outage_start + outage_len
+        if outage_end >= times[-1]:
+            continue  # sequence too short for this offset
+        res = run_ekf_fusion(
+            vdf, use_nhc=True, use_zupt=True,
+            gnss_denied_segment=(outage_start, outage_end),
+            ai_speeds=ai_speeds
+        )
+        window_results.append(res)
+
+    if not window_results:
+        # Fallback for very short sequences: single window near the middle.
+        outage_start = times[0] + duration * 0.5
+        window_results = [run_ekf_fusion(
+            vdf, use_nhc=True, use_zupt=True,
+            gnss_denied_segment=(outage_start, outage_start + outage_len),
+            ai_speeds=ai_speeds
+        )]
+
+    n_windows = len(window_results)
+    denied_drift_pct = float(np.mean([r['denied_drift_pct'] for r in window_results]))
+    denied_rmse_m = float(np.mean([r['rmse_m'] for r in window_results]))
+    denied_final_m = float(np.mean([r['final_error_m'] for r in window_results]))
+    denied_outage_rmse = float(np.mean([r['denied_rmse_m'] for r in window_results]))
+    denied_wholetrip_drift_pct = float(np.mean([r['drift_pct'] for r in window_results]))
+    # Keep one full run around for the illustrative S1 plot below.
+    res_ekf_denied = window_results[0]
 
     row = {
         'sequence': seq['sequence'],
@@ -83,25 +116,26 @@ for seq in test_seqs:
         'ekf_drift_pct': res_ekf['drift_pct'],
         'ekf_rmse_m': res_ekf['rmse_m'],
         'ekf_final_m': res_ekf['final_error_m'],
-        # EKF with GNSS denial
+        # EKF with GNSS denial — averaged over n_windows outage windows.
         # NOTE: this must be the outage-only drift (`denied_drift_pct`), not
         # the whole-trip drift — once GNSS is reacquired it keeps correcting
         # the filter for the rest of the trip, so the whole-trip number
         # converges near zero regardless of DR quality during the outage and
         # does not reflect the <10% SIH GNSS-denied requirement at all.
-        'ekf_denied_drift_pct': res_ekf_denied['denied_drift_pct'],
-        'ekf_denied_wholetrip_drift_pct': res_ekf_denied['drift_pct'],
-        'ekf_denied_rmse_m': res_ekf_denied['rmse_m'],
-        'ekf_denied_final_m': res_ekf_denied['final_error_m'],
-        'ekf_denied_outage_rmse': res_ekf_denied['denied_rmse_m'],
-        'outage_duration_s': 30.0,
+        'ekf_denied_drift_pct': denied_drift_pct,
+        'ekf_denied_wholetrip_drift_pct': denied_wholetrip_drift_pct,
+        'ekf_denied_rmse_m': denied_rmse_m,
+        'ekf_denied_final_m': denied_final_m,
+        'ekf_denied_outage_rmse': denied_outage_rmse,
+        'ekf_denied_n_windows': n_windows,
+        'outage_duration_s': outage_len,
     }
     all_results.append(row)
 
     print(f"\n  {seq['sequence']} ({row['dist_km']:.1f} km)")
     print(f"    Classical INS:     RMSE={row['ins_rmse_m']:>8.1f}m  drift={row['ins_drift_pct']:>6.1f}%")
     print(f"    EKF (full GNSS):  RMSE={row['ekf_rmse_m']:>8.1f}m  drift={row['ekf_drift_pct']:>6.1f}%")
-    print(f"    EKF (30s denied): RMSE={row['ekf_denied_rmse_m']:>8.1f}m  outage-drift={row['ekf_denied_drift_pct']:>6.1f}%  "
+    print(f"    EKF (30s denied, {n_windows} windows avg): RMSE={row['ekf_denied_rmse_m']:>8.1f}m  outage-drift={row['ekf_denied_drift_pct']:>6.1f}%  "
           f"(whole-trip drift={row['ekf_denied_wholetrip_drift_pct']:.1f}%)  outage_RMSE={row['ekf_denied_outage_rmse']:.1f}m")
 
 # ── Aggregate metrics ─────────────────────────────────────────────────────────
@@ -307,4 +341,4 @@ print(f"  Metrics saved: {METRICS_DIR / 'phase8_full_evaluation.json'}")
 
 sih_overall = 'PASS' if ekf_denied_pass >= len(all_results) // 2 else 'PARTIAL'
 print(f"\n  SIH Goal (<10% drift in GNSS-denied): {sih_overall}")
-print("\n  PHASE 8 STATUS: PASS")
+print(f"\n  PHASE 8 STATUS: {sih_overall} ({ekf_denied_pass}/{len(all_results)} sequences met the <10% GNSS-denied target)")

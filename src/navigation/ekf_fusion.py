@@ -80,24 +80,33 @@ class EKF_INS:
         self.timestamps = []
         self.innovations = []
 
-    def predict(self, dt, yaw_rate, forward_speed):
+    def predict(self, dt, yaw_rate):
         """
         Propagate state using vehicle kinematics.
+
+        Uses ONLY the speed already in the state (self.x[3]) — it must be
+        corrected by update_speed()/update_zupt() BEFORE predict() is called
+        each tick, not the other way around. The previous version took an
+        external `forward_speed` argument and blended 10% of it into the
+        state on every call; callers (see run_ekf_fusion) were passing the
+        ground-truth GPS speed for that argument on *every* tick, including
+        inside a simulated GNSS-denied window — silently leaking the answer
+        into what was supposed to be a GNSS-denied dead-reckoning test, and
+        in the wrong order relative to the speed update (this is the same
+        "predict() runs before speed is validated" bug the mobile app
+        (ekf_navigation.dart) already found and fixed — see
+        DRIVE_MODE_FIX_REPORT.md RC-2 — but this Python evaluation harness
+        never got the same fix).
 
         Args:
             dt: time step (s)
             yaw_rate: measured yaw rate (rad/s) — positive = left turn
-            forward_speed: measured speed (m/s)
         """
         x, y, psi, v, b_psi, b_v = self.x
 
-        # Bias-corrected measurements
         psi_dot = yaw_rate - b_psi
-        v_corr = max(0.0, forward_speed - b_v)
-
-        # State transition (mid-point Euler)
         psi_new = psi + psi_dot * dt
-        v_new = v * 0.9 + v_corr * 0.1  # smooth
+        v_new = v  # constant-velocity model; already corrected before predict()
 
         dx = v_new * np.sin(psi_new) * dt
         dy = v_new * np.cos(psi_new) * dt
@@ -120,7 +129,7 @@ class EKF_INS:
         F[1, 3] = np.cos(psi_new) * dt            # dy/dv
         F[1, 4] = v_new * np.sin(psi_new) * dt   # dy/db_psi
         F[2, 4] = -dt                              # dpsi/db_psi
-        F[3, 5] = -0.1                             # dv/db_v
+        F[3, 5] = 0.0                              # speed is constant, no dependency on b_v in predict
 
         # Covariance predict
         self.P = F @ self.P @ F.T + self.Q
@@ -299,24 +308,33 @@ def run_ekf_fusion(vdf, gnss_available_mask=None,
         if dt <= 0 or dt > 1.0:
             dt = 0.1
 
-        # Predict
-        ekf.predict(dt, yaw_rates[i], speeds[i])
-
-        # Speed update
+        # Speed must be corrected BEFORE predict() — predict() only
+        # advances position using whatever speed is already in the state
+        # (see EKF_INS.predict docstring). Getting this backwards was the
+        # root cause of the ground-truth leak into the "denied" window.
         if ai_speeds is not None and not gnss_mask[i]:
             speed_meas = ai_speeds[i]
         else:
             speed_meas = speeds[i]
-            
+
         ekf.update_speed(speed_meas)
+
+        # ZUPT when nearly stationary. NOTE: this still gates on the
+        # ground-truth `speeds[i]` — a real device can't do that, and
+        # instead uses an IMU-variance-based motion detector (see
+        # navigation_service.dart _updateMotionState). This is an
+        # idealized stand-in for that detector, not a claim that a real
+        # system has this information during a genuine GNSS outage.
+        if use_zupt and speeds[i] < 0.3:
+            ekf.update_zupt()
+
+        # Predict — now uses the just-corrected speed, not a stale or
+        # ground-truth-leaked one.
+        ekf.predict(dt, yaw_rates[i])
 
         # NHC update
         if use_nhc:
             ekf.update_nhc()
-
-        # ZUPT when nearly stationary
-        if use_zupt and speeds[i] < 0.3:
-            ekf.update_zupt()
 
         # GNSS update (only when available)
         if gnss_mask[i]:
