@@ -15,13 +15,14 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, '/Users/srujangowda/Desktop/WayFinder')
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 from src.preprocessing.loader import discover_sequences, load_sequence
-from src.preprocessing.alignment import estimate_alignment_matrix, apply_alignment
+from src.preprocessing.alignment import estimate_alignment_matrix, build_features, FEATURE_KEYS
 from src.ai_models.models import SpeedEstimator
 
-METRICS_DIR = Path('/Users/srujangowda/Desktop/WayFinder/results/metrics')
-PLOTS_DIR = Path('/Users/srujangowda/Desktop/WayFinder/results/plots')
+METRICS_DIR = REPO_ROOT / 'results' / 'metrics'
+PLOTS_DIR = REPO_ROOT / 'results' / 'plots'
 PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 print("=" * 60)
@@ -47,7 +48,7 @@ model.load_state_dict(torch.load(model_path, map_location=device))
 model.eval()
 
 # Select test sequence S1
-seqs = discover_sequences('/Users/srujangowda/Desktop/WayFinder/data/IO-VNBD-master')
+seqs = discover_sequences(str(REPO_ROOT / 'data' / 'IO-VNBD-master'))
 s1_seq = next((s for s in seqs if s['sequence'] == 'S1'), None)
 if s1_seq is None:
     print("Test sequence S1 not found.")
@@ -64,13 +65,11 @@ gt_speed = vdf['gps_velocity_ms'].values
 # 1. Alignment
 print("Estimating alignment matrix...")
 R = estimate_alignment_matrix(accel, gt_speed)
-aligned_accel, aligned_gyro = apply_alignment(accel, gyro, R)
-features = np.hstack([aligned_accel, aligned_gyro])
+features = build_features(accel, gyro, R)
 
 # 2. Normalisation
 print("Normalising features...")
-keys = ['accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z']
-for i, k in enumerate(keys):
+for i, k in enumerate(FEATURE_KEYS):
     if k in norm_stats:
         features[:, i] = (features[:, i] - norm_stats[k]['mean']) / norm_stats[k]['std']
 
@@ -91,7 +90,10 @@ for i in range(window_size, n):
     if len(X_batch) == 128 or i == n - 1:
         X_tensor = torch.tensor(np.array(X_batch, dtype=np.float32)).to(device)
         with torch.no_grad():
-            preds = model(X_tensor).cpu().numpy().flatten()
+            # Model output is (batch, 3) = [speed, log_var, vibration]; a
+            # bare .flatten() interleaves all three columns and then zip()
+            # silently truncates/misaligns against `indices`. Select speed.
+            preds = model(X_tensor)[:, 0].cpu().numpy()
         for idx, p in zip(indices, preds):
             pred_speed[idx] = max(0.0, float(p))  # speed cannot be negative
         X_batch = []
@@ -105,7 +107,7 @@ print("\n[LOG] Verification of Inference Inputs/Outputs:")
 for i in range(window_size, window_size + 10):
     print(f"Time: {times[i]:.2f}s | "
           f"Acc[0]: {features[i,:3].round(2)} | "
-          f"Gyr[0]: {features[i,3:].round(2)} | "
+          f"Gyr[0]: {features[i,3:6].round(2)} | "
           f"Pred Speed: {pred_speed[i]:.2f} m/s | "
           f"GT Speed: {gt_speed[i]:.2f} m/s")
 

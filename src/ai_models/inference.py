@@ -10,10 +10,10 @@ import torch
 import numpy as np
 from pathlib import Path
 
-from src.preprocessing.alignment import estimate_alignment_matrix, apply_alignment
+from src.preprocessing.alignment import estimate_alignment_matrix, build_features, FEATURE_KEYS
 from src.ai_models.models import SpeedEstimator
 
-METRICS_DIR = Path('/Users/srujangowda/Desktop/WayFinder/results/metrics')
+METRICS_DIR = Path(__file__).resolve().parents[2] / 'results' / 'metrics'
 
 _model = None
 _norm_stats = None
@@ -48,14 +48,12 @@ def predict_speed_sequence(vdf, sdf):
     gyro = sdf[['gyro_x_rads', 'gyro_y_rads', 'gyro_z_rads']].values
     gt_speed = vdf['gps_velocity_ms'].values
 
-    # Alignment
+    # Alignment + derived features (must match dataset.py / pipeline.py exactly)
     R = estimate_alignment_matrix(accel, gt_speed)
-    aligned_accel, aligned_gyro = apply_alignment(accel, gyro, R)
-    features = np.hstack([aligned_accel, aligned_gyro])
+    features = build_features(accel, gyro, R)
 
     # Normalisation
-    keys = ['accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z']
-    for i, k in enumerate(keys):
+    for i, k in enumerate(FEATURE_KEYS):
         if k in _norm_stats:
             features[:, i] = (features[:, i] - _norm_stats[k]['mean']) / _norm_stats[k]['std']
 
@@ -78,7 +76,13 @@ def predict_speed_sequence(vdf, sdf):
         if len(X_batch) == 128 or i == n - 1:
             X_tensor = torch.tensor(np.array(X_batch, dtype=np.float32)).to(_device)
             with torch.no_grad():
-                preds = _model(X_tensor).cpu().numpy().flatten()
+                # Model output is (batch, 3) = [speed, log_var, vibration].
+                # A bare .flatten() here interleaves all three columns
+                # row-major, then zip() against `indices` (len == batch)
+                # truncates to the first `batch` values of that interleaved
+                # stream — silently mixing speed/log_var/vibration values
+                # into what must be a pure speed sequence. Select column 0.
+                preds = _model(X_tensor)[:, 0].cpu().numpy()
             for idx, p in zip(indices, preds):
                 pred_speed[idx] = max(0.0, float(p))
             X_batch = []
