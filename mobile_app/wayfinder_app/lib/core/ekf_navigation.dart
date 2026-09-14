@@ -131,17 +131,29 @@ class EKFNavigation {
     _kalmanUpdate(H, R, innov);
   }
 
-  /// Non-Holonomic Constraint: zero lateral velocity.
+  /// Non-Holonomic Constraint: zero lateral (body-frame right) velocity.
+  ///
+  /// vRight = vx*cos(psi) - vy*sin(psi), where vx = v*sin(psi), vy = v*cos(psi)
+  /// are this state's own forward-velocity components. Substituting gives
+  /// vRight ≡ 0 for every psi and v: this state has no independent lateral-
+  /// velocity degree of freedom, so the correctly-derived constraint (and its
+  /// Jacobian) is an exact no-op here (zero H → zero Kalman gain).
+  ///
+  /// (The previous version paired the sin/cos terms the wrong way —
+  /// `-v*sin(psi)*sin(psi) + v*cos(psi)*cos(psi)` = `v*cos(2*psi)` — which is
+  /// generally non-zero and was injecting spurious corrections into the
+  /// heading/speed state on every tick.)
   void updateNhc() {
     final psi = _x[2];
     final v = _x[3];
 
     final H = [List.filled(6, 0.0)];
-    H[0][2] = v * math.cos(psi);
-    H[0][3] = -math.sin(psi);
+    H[0][2] = 0.0; // d(vRight)/d(psi) — vRight is identically 0 in this model
+    H[0][3] = 0.0; // d(vRight)/d(v)
 
-    final vRight = -v * math.sin(psi) * math.sin(psi) +
-        v * math.cos(psi) * math.cos(psi);
+    final vx = v * math.sin(psi);
+    final vy = v * math.cos(psi);
+    final vRight = vx * math.cos(psi) - vy * math.sin(psi);
     final innov = [0.0 - vRight];
 
     final R = [[_rNhc]];

@@ -169,23 +169,33 @@ class EKF_INS:
     def update_nhc(self):
         """
         Non-Holonomic Constraint: vehicle cannot move sideways.
-        Constrains: v_lateral = -vx*sin(psi) + vy*cos(psi) = 0
+        Constrains body-frame lateral (right) velocity: v_right = 0, where
 
-        For a ground vehicle, velocity in body frame:
-          v_right = -vx*sin(psi) + vy*cos(psi) ≈ 0
+          v_right = vx*cos(psi) - vy*sin(psi)
+
+        Since this state's own forward velocity is vx = v*sin(psi),
+        vy = v*cos(psi), substituting gives v_right ≡ 0 for every psi and v:
+        this state has no independent lateral-velocity degree of freedom, so
+        the correctly-derived constraint (and its Jacobian) is an exact
+        no-op here (zero H → zero Kalman gain).
+
+        (The previous version paired the sin/cos terms the wrong way —
+        `-vx*sin(psi) + vy*cos(psi)` = `v*cos(2*psi)` — which is generally
+        non-zero and was injecting spurious corrections into heading/speed
+        on every update.)
         """
         psi = self.x[2]
         v = self.x[3]
 
         # Measurement: v_right = 0
         H = np.zeros((1, 6))
-        H[0, 2] = v * np.cos(psi)   # d(v_right)/d(psi)
-        H[0, 3] = -np.sin(psi)       # NOTE: correct sign for lateral
+        H[0, 2] = 0.0   # d(v_right)/d(psi) — v_right is identically 0 here
+        H[0, 3] = 0.0   # d(v_right)/d(v)
 
         # Predicted lateral velocity
         vx = v * np.sin(psi)
         vy = v * np.cos(psi)
-        v_right_pred = -vx * np.sin(psi) + vy * np.cos(psi)
+        v_right_pred = vx * np.cos(psi) - vy * np.sin(psi)
 
         innovation = np.array([0.0 - v_right_pred])
 
@@ -322,15 +332,38 @@ def run_ekf_fusion(vdf, gnss_available_mask=None,
     dists = np.sqrt(np.diff(gt_x)**2 + np.diff(gt_y)**2)
     total_dist = float(np.sum(dists))
 
-    # Metrics during GNSS-denied period only (if applicable)
+    # Metrics during GNSS-denied period only (if applicable).
+    #
+    # NOTE: `drift_pct` below (final whole-trip error / whole-trip distance)
+    # is NOT a measure of dead-reckoning accuracy during a simulated outage —
+    # once GNSS is reacquired it keeps correcting the filter for the rest of
+    # the (often much longer) trip, so `errors_m[-1]` converges back toward
+    # zero regardless of how bad the DR was during the outage. The metric
+    # that actually answers "how much did the position drift during the N-
+    # second GNSS-denied segment" is `denied_drift_pct` below: the position
+    # error *added* during the outage window, divided by the distance
+    # actually travelled during that same window.
     denied_mask = ~gnss_mask
     if denied_mask.sum() > 0:
         denied_errors = errors_m[denied_mask]
         denied_rmse = float(np.sqrt(np.mean(denied_errors**2)))
         denied_max = float(denied_errors.max())
+
+        denied_idx = np.where(denied_mask)[0]
+        start_idx = int(denied_idx[0])
+        end_idx = int(denied_idx[-1])
+        baseline_error = float(errors_m[start_idx - 1]) if start_idx > 0 else 0.0
+        outage_added_error = float(errors_m[end_idx] - baseline_error)
+        outage_dist = float(np.sum(dists[start_idx:end_idx])) if end_idx > start_idx else 0.0
+        denied_drift_pct = (
+            float(outage_added_error / outage_dist * 100.0) if outage_dist > 0 else 0.0
+        )
     else:
         denied_rmse = 0.0
         denied_max = 0.0
+        outage_dist = 0.0
+        outage_added_error = 0.0
+        denied_drift_pct = 0.0
 
     return {
         'est_x': est_x, 'est_y': est_y,
@@ -343,7 +376,16 @@ def run_ekf_fusion(vdf, gnss_available_mask=None,
         'mean_error_m': float(np.mean(errors_m)),
         'max_error_m': float(errors_m.max()),
         'rmse_m': float(np.sqrt(np.mean(errors_m**2))),
+        # Whole-trip drift — NOT representative of outage-only performance
+        # once GNSS is reacquired partway through. Kept for backward
+        # compatibility with callers that want the full-trip number.
         'drift_pct': float(errors_m[-1] / total_dist * 100.0) if total_dist > 0 else 0.0,
         'denied_rmse_m': denied_rmse,
         'denied_max_error_m': denied_max,
+        # The correct "SIH-style" metric: drift accumulated specifically
+        # during the GNSS-denied window, relative to distance travelled
+        # during that window.
+        'denied_outage_dist_m': outage_dist,
+        'denied_outage_added_error_m': outage_added_error,
+        'denied_drift_pct': denied_drift_pct,
     }

@@ -21,11 +21,17 @@ from src.preprocessing.loader import (
 )
 
 # ─── TRAIN / VAL / TEST SPLIT ─────────────────────────────────────────────────
-# Trajectory-level split — NO temporal leakage
+# Trajectory-level split — NO temporal leakage.
+#
+# TEST_DRIVERS must be drivers that never appear in TRAIN/VAL, or "test"
+# results don't measure cross-driver generalisation at all. 'Vf (Driver E)'
+# is the same underlying driver as 'Vta'/'Vtb' (train) and 'Vw' (val) — only
+# the vehicle/session label differs — so it belongs in VAL, not TEST.
+# Genuinely unseen-driver testing is only 'S (Driver A)' and 'Y (Driver D)'.
 
 TRAIN_DRIVERS = ['Vta (Driver E)', 'Vtb (Driver E)']
-VAL_DRIVERS   = ['Vw (Driver E)']
-TEST_DRIVERS  = ['S (Driver A)', 'Y (Driver D)', 'Vf (Driver E)']
+VAL_DRIVERS   = ['Vw (Driver E)', 'Vf (Driver E)']
+TEST_DRIVERS  = ['S (Driver A)', 'Y (Driver D)']
 
 
 def trajectory_split(sequences: list) -> dict:

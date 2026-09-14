@@ -155,8 +155,12 @@ To avoid data leakage, sequences are split at the trajectory level:
 | Split | Driver/Category | Sequences | Rationale |
 |-------|----------------|-----------|-----------|
 | Train | Vta (Driver E), Vtb (Driver E) | ~42 seq | Large set, same driver |
-| Validation | Vw (Driver E) | ~20 seq | Same driver, different routes |
-| Test | S (Driver A), Y (Driver D), Vf (Driver E) | ~9 seq | Different drivers — true generalisation |
+| Validation | Vw (Driver E), Vf (Driver E) | ~22 seq | Same driver, different routes/sessions |
+| Test | S (Driver A), Y (Driver D) | ~7 seq | Different drivers — true generalisation |
+
+`Vf (Driver E)` was previously listed under Test, but it is the same driver as
+Train/Val (only the vehicle/session label differs), so evaluating on it never
+tested cross-driver generalisation — it has been moved to Validation.
 
 **No temporal leakage:** Adjacent time samples within one trajectory are never split across train/test.
 

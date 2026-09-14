@@ -1,5 +1,19 @@
 # WayFinder — System Tests & Results Report
 
+> **⚠️ Correction (2026-09-15):** The "0.2% Drift" / "EKF/NHC Fusion Test: PASS"
+> results below relied on (1) an EKF `drift_pct` metric that measured
+> whole-trip error instead of GNSS-outage-only error, and (2) a buggy NHC
+> formula that computed a spurious non-zero "lateral velocity" instead of the
+> mathematically-correct no-op for this state model. Both are now fixed in
+> `src/navigation/ekf_fusion.py` / `mobile_app/wayfinder_app/lib/core/ekf_navigation.dart`
+> — see `PROJECT_REPORT.md` §4 for a reproduction showing the old metric
+> reporting 0.0% drift on a case with 50%-wrong AI speed for the whole
+> outage, vs. ~47% under the corrected metric. The EKF/NHC results and the
+> "Map Matching: PASS (HMM-style Viterbi)" claim further down this document
+> also do not match the actual code (`map_matcher.dart` is a plain
+> nearest-segment projection, not an HMM/Viterbi map matcher) — treat this
+> document as unreliable until re-verified against the current code.
+
 ## Overview
 This document outlines the testing, methodology, and empirical results of the WayFinder Intelligent Dead Reckoning system. The tests were performed to guarantee the integrity of the GNSS-denied navigation pipeline required for SIH26168.
 

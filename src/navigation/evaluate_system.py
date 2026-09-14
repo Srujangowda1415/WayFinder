@@ -40,7 +40,7 @@ print("  Phase 8 — Full System Evaluation")
 print("=" * 70)
 
 seqs = discover_sequences('/Users/srujangowda/Desktop/WayFinder/data/IO-VNBD-master')
-test_seqs = [s for s in seqs if s['driver'] in ['S (Driver A)', 'Y (Driver D)', 'Vf (Driver E)']]
+test_seqs = [s for s in seqs if s['driver'] in ['S (Driver A)', 'Y (Driver D)']]  # unseen-driver only; see pipeline.py TEST_DRIVERS
 print(f"\nEvaluating on {len(test_seqs)} test sequences...")
 
 all_results = []
@@ -83,7 +83,13 @@ for seq in test_seqs:
         'ekf_rmse_m': res_ekf['rmse_m'],
         'ekf_final_m': res_ekf['final_error_m'],
         # EKF with GNSS denial
-        'ekf_denied_drift_pct': res_ekf_denied['drift_pct'],
+        # NOTE: this must be the outage-only drift (`denied_drift_pct`), not
+        # the whole-trip drift — once GNSS is reacquired it keeps correcting
+        # the filter for the rest of the trip, so the whole-trip number
+        # converges near zero regardless of DR quality during the outage and
+        # does not reflect the <10% SIH GNSS-denied requirement at all.
+        'ekf_denied_drift_pct': res_ekf_denied['denied_drift_pct'],
+        'ekf_denied_wholetrip_drift_pct': res_ekf_denied['drift_pct'],
         'ekf_denied_rmse_m': res_ekf_denied['rmse_m'],
         'ekf_denied_final_m': res_ekf_denied['final_error_m'],
         'ekf_denied_outage_rmse': res_ekf_denied['denied_rmse_m'],
@@ -94,7 +100,8 @@ for seq in test_seqs:
     print(f"\n  {seq['sequence']} ({row['dist_km']:.1f} km)")
     print(f"    Classical INS:     RMSE={row['ins_rmse_m']:>8.1f}m  drift={row['ins_drift_pct']:>6.1f}%")
     print(f"    EKF (full GNSS):  RMSE={row['ekf_rmse_m']:>8.1f}m  drift={row['ekf_drift_pct']:>6.1f}%")
-    print(f"    EKF (30s denied): RMSE={row['ekf_denied_rmse_m']:>8.1f}m  drift={row['ekf_denied_drift_pct']:>6.1f}%  outage_RMSE={row['ekf_denied_outage_rmse']:.1f}m")
+    print(f"    EKF (30s denied): RMSE={row['ekf_denied_rmse_m']:>8.1f}m  outage-drift={row['ekf_denied_drift_pct']:>6.1f}%  "
+          f"(whole-trip drift={row['ekf_denied_wholetrip_drift_pct']:.1f}%)  outage_RMSE={row['ekf_denied_outage_rmse']:.1f}m")
 
 # ── Aggregate metrics ─────────────────────────────────────────────────────────
 
@@ -160,7 +167,7 @@ ax_traj.plot(res_ins_s1['est_x']/1000, res_ins_s1['est_y']/1000,
 ax_traj.plot(res_ekf_s1['est_x']/1000, res_ekf_s1['est_y']/1000,
              'g-', lw=0.8, label=f"EKF full GNSS (drift={res_ekf_s1['drift_pct']:.1f}%)", alpha=0.75)
 ax_traj.plot(res_ekf_denied_s1['est_x']/1000, res_ekf_denied_s1['est_y']/1000,
-             'm:', lw=1.0, label=f"EKF 30s denied (drift={res_ekf_denied_s1['drift_pct']:.1f}%)", alpha=0.85)
+             'm:', lw=1.0, label=f"EKF 30s denied (outage drift={res_ekf_denied_s1['denied_drift_pct']:.1f}%)", alpha=0.85)
 ax_traj.plot(0, 0, 'go', ms=10, label='Start')
 ax_traj.set_xlabel('Easting (km)')
 ax_traj.set_ylabel('Northing (km)')
@@ -171,7 +178,7 @@ ax_traj.grid(True, alpha=0.3)
 # (0,2) Summary bar chart
 ax_bar = fig.add_subplot(gs[0, 2])
 methods = ['Classical\nINS', 'EKF\nfull', 'EKF\ndenied']
-drifts = [res_ins_s1['drift_pct'], res_ekf_s1['drift_pct'], res_ekf_denied_s1['drift_pct']]
+drifts = [res_ins_s1['drift_pct'], res_ekf_s1['drift_pct'], res_ekf_denied_s1['denied_drift_pct']]
 colors = ['#e74c3c', '#2ecc71', '#f39c12']
 bars = ax_bar.bar(methods, drifts, color=colors, edgecolor='white', linewidth=1.5)
 ax_bar.axhline(SIH_TARGET, color='black', ls='--', lw=1.5, label='SIH 10%')

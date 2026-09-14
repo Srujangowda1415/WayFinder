@@ -1,5 +1,12 @@
 # WayFinder — Project Status
 
+> **⚠️ Correction (2026-09-15):** The "0.2% Mean Drift" figure cited below was
+> computed with a metric bug (whole-trip drift instead of GNSS-outage-only
+> drift) and an NHC formula bug, both now fixed in code — see the correction
+> note in `PROJECT_REPORT.md` §4 for details and a reproduction. The actual
+> drift number needs re-evaluation and is likely much higher; treat the
+> "READY"/"PASS" statuses below as outdated until that re-evaluation is done.
+
 ## Final Project Status
 
 Overall: **READY ✅**
