@@ -15,7 +15,8 @@ import pandas as pd
 from pathlib import Path
 import json
 import sys
-sys.path.insert(0, '/Users/srujangowda/Desktop/WayFinder')
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 from src.preprocessing.loader import (
     discover_sequences, load_sequence, haversine_m
 )
@@ -168,8 +169,8 @@ def create_sliding_windows(sdf, vdf, window_size=100, stride=10,
 # ─── MAIN PIPELINE ────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    DATA_ROOT = '/Users/srujangowda/Desktop/WayFinder/data/IO-VNBD-master'
-    OUT_DIR = Path('/Users/srujangowda/Desktop/WayFinder/results/metrics')
+    DATA_ROOT = str(REPO_ROOT / 'data' / 'IO-VNBD-master')
+    OUT_DIR = REPO_ROOT / 'results' / 'metrics'
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     
     print("=" * 60)

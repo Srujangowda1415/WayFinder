@@ -22,14 +22,15 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, '/Users/srujangowda/Desktop/WayFinder')
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 from src.preprocessing.loader import discover_sequences, load_sequence
 from src.navigation.classical_ins import run_classical_ins
 from src.navigation.ekf_fusion import run_ekf_fusion
 from src.ai_models.inference import predict_speed_sequence
 
-METRICS_DIR = Path('/Users/srujangowda/Desktop/WayFinder/results/metrics')
-PLOTS_DIR = Path('/Users/srujangowda/Desktop/WayFinder/results/plots')
+METRICS_DIR = REPO_ROOT / 'results' / 'metrics'
+PLOTS_DIR = REPO_ROOT / 'results' / 'plots'
 METRICS_DIR.mkdir(parents=True, exist_ok=True)
 PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -39,7 +40,7 @@ print("=" * 70)
 print("  Phase 8 — Full System Evaluation")
 print("=" * 70)
 
-seqs = discover_sequences('/Users/srujangowda/Desktop/WayFinder/data/IO-VNBD-master')
+seqs = discover_sequences(str(REPO_ROOT / 'data' / 'IO-VNBD-master'))
 test_seqs = [s for s in seqs if s['driver'] in ['S (Driver A)', 'Y (Driver D)']]  # unseen-driver only; see pipeline.py TEST_DRIVERS
 print(f"\nEvaluating on {len(test_seqs)} test sequences...")
 

@@ -19,12 +19,13 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-sys.path.insert(0, '/Users/srujangowda/Desktop/WayFinder')
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 from src.preprocessing.loader import discover_sequences, load_sequence
 from src.navigation.classical_ins import run_classical_ins
 
-PLOTS_DIR = Path('/Users/srujangowda/Desktop/WayFinder/results/plots')
-METRICS_DIR = Path('/Users/srujangowda/Desktop/WayFinder/results/metrics')
+PLOTS_DIR = REPO_ROOT / 'results' / 'plots'
+METRICS_DIR = REPO_ROOT / 'results' / 'metrics'
 PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 print("=" * 60)
@@ -33,7 +34,7 @@ print("=" * 60)
 
 # ─── CALIBRATE YAW SIGN ON ONE TRAINING SEQUENCE ──────────────────────────────
 
-seqs = discover_sequences('/Users/srujangowda/Desktop/WayFinder/data/IO-VNBD-master')
+seqs = discover_sequences(str(REPO_ROOT / 'data' / 'IO-VNBD-master'))
 train_seqs = [s for s in seqs if 'Vta' in s['sequence'] or 'Vtb' in s['sequence']]
 cal_seq = train_seqs[0]
 
