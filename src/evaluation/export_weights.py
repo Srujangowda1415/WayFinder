@@ -14,11 +14,12 @@ import torch
 import numpy as np
 from pathlib import Path
 
-sys.path.insert(0, '/Users/srujangowda/Desktop/WayFinder')
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 from src.ai_models.models import SpeedEstimator
 
-METRICS_DIR = Path('/Users/srujangowda/Desktop/WayFinder/results/metrics')
-ASSETS_DIR  = Path('/Users/srujangowda/Desktop/WayFinder/mobile_app/wayfinder_app/assets')
+METRICS_DIR = REPO_ROOT / 'results' / 'metrics'
+ASSETS_DIR  = REPO_ROOT / 'mobile_app' / 'wayfinder_app' / 'assets'
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 print("=" * 60)

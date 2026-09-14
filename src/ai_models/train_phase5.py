@@ -14,13 +14,14 @@ import time
 import numpy as np
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, '/Users/srujangowda/Desktop/WayFinder')
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 from src.ai_models.dataset import get_dataloaders
 from src.ai_models.models import MotionClassifier
 
-DATA_ROOT = '/Users/srujangowda/Desktop/WayFinder/data/IO-VNBD-master'
-METRICS_DIR = Path('/Users/srujangowda/Desktop/WayFinder/results/metrics')
-PLOTS_DIR = Path('/Users/srujangowda/Desktop/WayFinder/results/plots')
+DATA_ROOT = str(REPO_ROOT / 'data' / 'IO-VNBD-master')
+METRICS_DIR = REPO_ROOT / 'results' / 'metrics'
+PLOTS_DIR = REPO_ROOT / 'results' / 'plots'
 
 print("=" * 60)
 print("  Phase 5 — AI Vibration / Motion Model")
