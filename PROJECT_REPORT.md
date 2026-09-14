@@ -1,14 +1,21 @@
 # WayFinder — AI-Enhanced GNSS-Denied Navigation System
 **Comprehensive Project Report**
 
+> **📋 See `FAILURE_ANALYSIS_AND_NEXT_STEPS.md`** for the current root-cause
+> analysis (learning-curve, capacity, and EKF-ceiling experiments) and hard
+> recommendation: **CHANGE DATASET**. This report's §4 conclusion (that
+> further model/EKF tuning was the path forward) is superseded by that
+> document's evidence that the system is data-limited, not capacity- or
+> formulation-limited.
+
 ---
 
 ## 1. Executive Summary
 WayFinder is an advanced, smartphone-based navigation system designed to solve the **Smart India Hackathon (SIH)** challenge: achieving **< 10% position drift over a 30-second GNSS-denied segment** using only smartphone sensors (IMU). 
 
-Traditional Pedestrian Dead Reckoning (PDR) or simple accelerometer integration for vehicles fails catastrophically due to gravity leakage, tilt, and sensor noise (often exceeding 50% drift). WayFinder solves this by combining a **Lightweight 1D CNN-GRU Neural Network** to estimate forward speed from raw IMU data, and an **Extended Kalman Filter (EKF)** with Non-Holonomic Constraints (NHC) to fuse the AI speed with compass heading, completely eliminating lateral drift. 
+Traditional Pedestrian Dead Reckoning (PDR) or simple accelerometer integration for vehicles fails catastrophically due to gravity leakage, tilt, and sensor noise (often exceeding 50% drift). WayFinder attempts to solve this by combining a **Lightweight 1D CNN-GRU Neural Network** to estimate forward speed from raw IMU data, and an **Extended Kalman Filter (EKF)** to fuse the AI speed with gyroscope heading.
 
-The final system was previously reported to achieve a **0.2% mean drift** and **100% pass rate** on the test dataset — **this number has since been found to be measured incorrectly (see §4) and is not currently reliable**; the system runs fully on-device in a Flutter mobile app, but its true GNSS-denied drift performance needs re-evaluation with the corrected metric.
+**Corrected result (2026-09-15):** the system was previously reported to achieve a **0.2% mean drift** and **100% pass rate**. That number came from a chain of bugs — a whole-trip-instead-of-outage-only drift metric, an NHC formula bug, an alignment sign-ambiguity bug that corrupted ~40% of training data, a normalization/alignment mismatch, an inference bug that scrambled speed/variance/vibration outputs together, and an EKF harness bug that leaked ground-truth GPS speed into the "GNSS-denied" simulation (see §3.2, §3.3, §4 for each). All are now fixed, and the CNN-GRU speed estimator was reworked (wider architecture, fixed loss weighting, inverse-frequency sample weighting to correct a training-data speed-bin imbalance). The evaluation methodology was also hardened: drift is now averaged over 5 outage windows per test sequence instead of one fixed window, since a single window turned out to be highly sensitive to luck. Re-running everything end-to-end against the real IO-VNBD dataset gives a **true mean GNSS-denied drift of 103.7%**, with **0 of 7** unseen-driver test sequences meeting the SIH <10% target. The system does not currently meet the SIH requirement, and the gap is larger than earlier single-window measurements (taken mid-debugging) suggested. See §4 for the full results, the debugging history, and why further progress likely needs more/better training data rather than more code fixes.
 
 ---
 
@@ -36,13 +43,15 @@ Accelerometers measure acceleration ($m/s^2$). Integrating this once yields spee
 
 Instead of mathematically integrating the accelerometer, WayFinder uses an **Artificial Neural Network** to learn the complex, non-linear mapping between vehicle vibrations/IMU patterns and true forward speed.
 
-**Model Architecture (`LightweightCNNGRU`)**:
+**Model Architecture (`LightweightCNNGRU`)** — updated 2026-09-15:
 - **Input**: A 5-second sliding window of 6-axis IMU data (50 samples @ 10 Hz).
-- **Conv1D Layer 1**: Extracts local spatial/vibration features (16 filters, kernel size 3) → ReLU → MaxPool(2).
-- **Conv1D Layer 2**: Extracts higher-level features (32 filters, kernel size 3) → ReLU → MaxPool(2).
-- **GRU Layer**: A Gated Recurrent Unit (32 hidden units) processes the sequence of CNN features to capture temporal dynamics (acceleration and braking profiles).
-- **Fully Connected (Dense) Layer**: Outputs a single float: predicted forward speed ($m/s$).
-- **Size**: The model is incredibly lightweight (**~174 KB**) and runs in pure Dart code on the mobile app, requiring zero external heavy machine learning libraries (no TFLite needed).
+- **Conv1D Layer 1**: 24 filters, kernel size 5 (was 16/k3) → ReLU → MaxPool(2).
+- **Conv1D Layer 2**: 48 filters, kernel size 5 (was 32/k3) → ReLU → MaxPool(2) → Dropout(0.2).
+- **GRU Layer**: 48 hidden units (was 32); takes the last timestep's output (tried mean-pooling over the window — reverted, see changelog below) → Dropout(0.2).
+- **Fully Connected (Dense) Layer**: Outputs `[speed, log_variance, vibration_score]`.
+- **Size**: **~82 KB** (still comfortably lightweight) — validated to run in pure Dart on the mobile app.
+
+**2026-09-15 training-side changelog** (validation RMSE: 32.5 km/h → 24.4 km/h): widened channels/kernel size; fixed a loss-weighting bug where an auxiliary "vibration" head was weighted 5x the primary speed task (cut to 0.05x); clamped log-variance to stop the GNLL loss from minimizing itself by inflating predicted uncertainty instead of improving the point estimate; trained longer (60 epochs, early-stopped) instead of a fixed 10; tried mean-pooling the GRU output over the window instead of taking only the last timestep — this smeared earlier (higher-speed) dynamics into predictions for windows ending in a stop/slowdown and made low-speed bias measurably worse, so it was reverted. The single biggest lever was **inverse-frequency sample weighting**: training windows were heavily imbalanced toward cruising speed (47% in 10-20 m/s, <10% near-stationary), which was driving a "regression to the mean" bias — low speeds over-predicted, high speeds under-predicted, worst exactly where it matters most for drift (a falsely-inflated speed during a real stop integrates straight into position error). Weighting samples by inverse speed-bin frequency dropped the stationary-hallucination rate (predicting >2 m/s while truly stationary) from 17% to 6%.
 
 ### 3.3 Extended Kalman Filter (EKF) Fusion (Phase 7)
 The AI model predicts forward speed, and the compass predicts heading, but these predictions contain noise. The EKF optimally fuses these measurements.
@@ -58,29 +67,40 @@ The AI model predicts forward speed, and the compass predicts heading, but these
 
 ## 4. Evaluation and Results (Phase 8)
 
-**⚠️ Correction (2026-09-15):** The table below (and the underlying `phase8_full_evaluation.json`) was produced with a metric bug in `run_ekf_fusion()` (`src/navigation/ekf_fusion.py`): `drift_pct` was computed as `final_error_m / total_dist_m` using the position error at the **end of the entire trip** and the **entire trip's distance** — not the error/distance during the 30-second simulated GNSS outage being tested. Since GNSS is reacquired after the 30s outage and keeps correcting the filter for the rest of the (often 1+ hour) trip, the end-of-trip error converges back toward zero regardless of how bad the dead-reckoning was during the outage. A synthetic test (AI speed deliberately wrong by 50% for the full 30s outage) reproduced this: the old metric reported **0.0% drift**, while the corrected outage-only metric (`denied_drift_pct`, added in the same fix) correctly reported **~47% drift**. The code has been fixed to compute and report `denied_drift_pct` (error accumulated *during* the outage window ÷ distance travelled *during* that window) as the primary GNSS-denied metric.
-The numbers in the table below are therefore **not reliable** and must be regenerated by re-running `python src/navigation/evaluate_system.py` against the real IO-VNBD dataset (this repo's local `data/IO-VNBD-master/` is empty, so it could not be re-run here). The table is left in place for historical reference only — treat every number in the "WayFinder (AI + EKF) Drift" column as unverified until regenerated.
+**⚠️ Correction (2026-09-15, updated same day after CNN-GRU rework):** The numbers originally reported here were produced with a metric bug in `run_ekf_fusion()`: `drift_pct` used the position error/distance over the **entire trip**, not the 30-second outage being tested, so it converged near zero regardless of dead-reckoning quality. That bug is fixed (`denied_drift_pct`, isolating outage-only error/distance).
 
-The system was evaluated against a **Classical INS** (Inertial Navigation System) baseline using raw mathematical integration.
+While validating the fix, three more bugs surfaced and were fixed:
+- **`estimate_alignment_matrix()` had a sign-ambiguous "forward axis"** (`src/preprocessing/alignment.py`): 32 of 42 training sequences fell back to a PCA eigenvector with no defined sign, and ~half of those came out backwards — i.e. the same physical event (accelerating) had opposite-signed features across roughly half of training data. Fixed by resolving the sign against actual speed change direction; verified 0/42 sign-flips post-fix (was 17/42).
+- **Normalization stats were computed from raw phone-frame IMU data, but the model is trained/run on vehicle-frame (aligned) data** (`src/preprocessing/pipeline.py`) — inconsistent with what the model actually sees. Fixed to compute stats from aligned data.
+- **`predict_speed_sequence()` (`src/ai_models/inference.py`) silently scrambled predictions**: the model outputs `(batch, 3)` = `[speed, log_var, vibration]`, but a bare `.flatten()` interleaved all three columns before truncating against the output index list — so the "AI speed" sequence fed into every evaluation run was actually a mix of speed, log-variance, and vibration values, not pure speed. Fixed to select column 0 explicitly.
+- **`EKF_INS.predict()` leaked ground-truth GPS speed into the "GNSS-denied" simulation**: it took a `forward_speed` argument and blended 10% of it into the state on every call — and `run_ekf_fusion()` was passing the true GPS speed for that argument on every tick, including inside the simulated outage window, before the speed measurement update even ran. This is the same "predict() before speed is validated" bug the mobile app already found and fixed (`DRIVE_MODE_FIX_REPORT.md` RC-2), never back-ported to this Python harness. Fixed: `predict()` no longer takes an external speed argument, and the loop now updates speed (from AI or ZUPT) *before* calling predict(), matching `ekf_navigation.dart`.
+
+The CNN-GRU itself was also reworked (see §3.2 changelog): wider CNN channels, a fixed loss (the vibration auxiliary head was weighted 5x the primary speed task — cut to 0.05x; log-variance is now clamped to stop the GNLL loss from "cheating" by inflating uncertainty), more epochs with early stopping, and **inverse-frequency sample weighting** during training, since training windows were heavily imbalanced (47% at 10-20 m/s cruising speed, <10% near-stationary), causing systematic "regression to the mean": low speeds over-predicted, high speeds under-predicted. This dropped the stationary-hallucination rate (predicting >2 m/s while truly stationary) from 17% to 6% and roughly halved the low-speed bias. Validation RMSE improved from 9.03 m/s (32.5 km/h) to roughly 6.5–7.4 m/s (23–27 km/h) depending on training run (see next paragraph on why that range matters).
+
+**Two more things surfaced while trying to validate whether the CNN-GRU rework actually helped, and they matter more than any single number in the table below:**
+1. **Training-run variance is large relative to the differences between architecture changes.** Re-running the *identical* config (same code, same data) produced val RMSE anywhere from 6.5–7.4 m/s and downstream mean outage drift anywhere from 53.8% to 64.2% on a single fixed test window — a bigger swing than most of the deliberate architecture changes tried (wider channels, mean-pooling vs. last-timestep, added magnitude features). Training now uses a fixed seed (`torch.manual_seed(42)`) to remove one axis of this noise, but a single seed is still one sample, not a distribution.
+2. **A single fixed 30-second test window per sequence is not a reliable way to compare models.** `evaluate_system.py` now averages the outage-drift metric over 5 windows (at 15/30/45/60/75% into each trip) per sequence instead of one fixed window at 25%. This is a more statistically honest measurement — and it's *worse* than any single-window snapshot had suggested (a single window can get lucky). **This is the number that should be trusted going forward.**
+
+**The table below is the 5-window-averaged result, re-run end-to-end against the real IO-VNBD dataset** (previously only Git LFS pointer stubs in this environment) — not a projection.
+
+The system was evaluated against a **Classical INS** baseline using raw mathematical integration. Two EKF conditions are shown: **full GNSS** (GPS available the whole trip — mostly confirms the filter tracks GPS, not a dead-reckoning quality measure) and **30s GNSS-denied** (the actual SIH scenario, averaged over 5 windows per sequence).
 
 **SIH Target**: < 10% drift over a 30-second GNSS-denied segment.
 
-| Test Sequence | Distance | Classical INS Drift | **WayFinder (AI + EKF) Drift — UNVERIFIED, see correction above** | Status |
-|---------------|----------|---------------------|--------------------------------|--------|
-| S1 (38.0 km)  | 38.0 km  | 9.2%                | 0.0%                       | UNVERIFIED   |
-| S2 (75.5 km)  | 75.5 km  | 53.8%               | 0.0%                       | UNVERIFIED   |
-| S3a (25.9 km) | 25.9 km  | 6.8%                | 0.1%                       | UNVERIFIED   |
-| S3b (3.8 km)  | 3.8 km   | 7.6%                | 1.6%                       | UNVERIFIED   |
-| S3c (44.2 km) | 44.2 km  | 66.6%               | 0.0%                       | UNVERIFIED   |
-| S4 (88.4 km)  | 88.4 km  | 15.3%               | 0.1%                       | UNVERIFIED   |
-| V-Vfa01       | 18.8 km  | 111.5%              | 0.0%                       | UNVERIFIED   |
-| V-Vfa02       | 163.9 km | 89.0%               | 0.0%                       | UNVERIFIED   |
-| Y1 (60.7 km)  | 60.7 km  | 6.2%                | 0.1%                       | UNVERIFIED   |
-| **MEAN**      |          | **40.7%**           | 0.2%                       | **UNVERIFIED** |
+| Test Sequence | Distance | Classical INS Drift (whole trip, no GNSS) | EKF, full GNSS | **EKF, 30s GNSS-denied, 5-window avg (the SIH metric)** | SIH Status |
+|---------------|----------|---------------------|-----------------|--------------------------------|--------|
+| S1  | 38.0 km  | 9.2%   | 0.0%  | **19.1%**  | FAIL |
+| S2  | 75.5 km  | 53.8%  | 0.0%  | **162.3%** | FAIL |
+| S3a | 25.9 km  | 6.8%   | 0.0%  | **14.8%**  | FAIL |
+| S3b | 3.8 km   | 7.6%   | 0.0%  | **45.8%**  | FAIL |
+| S3c | 44.2 km  | 66.6%  | 0.0%  | **42.8%**  | FAIL |
+| S4  | 88.4 km  | 15.3%  | 0.0%  | **226.2%** | FAIL |
+| Y1  | 60.7 km  | 6.2%   | 0.1%  | **215.3%** | FAIL |
+| **MEAN** |      | **23.7%** | **0.01%** | **103.7%** | **0/7 PASS** |
 
-Additionally, `V-Vfa01`/`V-Vfa02` are from `Vf (Driver E)`, the same underlying driver as the training set (only the vehicle/session label differs) — the train/val/test split has been corrected in `src/preprocessing/pipeline.py` to move `Vf` into validation, so re-running the pipeline will also change which sequences appear as "test" results.
+(Test set is `S (Driver A)` and `Y (Driver D)` only — 7 sequences — per the split-leakage fix in §2.)
 
-**Conclusion**: Pending re-evaluation with the corrected metric and split, no drift conclusion can currently be drawn. The model's own validation RMSE (~32 km/h, see `CNN_GRU_DIAGNOSTIC_REPORT.md`) suggests the true GNSS-denied drift is likely far higher than the numbers previously reported here.
+**Conclusion**: The system does **not** meet the SIH <10% GNSS-denied drift target, and — once measured without a single-window's luck baked in — the gap is larger than earlier single-window snapshots suggested (mean 103.7% vs. the 42.6–64.2% range seen across different single-window/single-seed measurements during this debugging pass). All of the concrete bugs found along the way (alignment sign flip, normalization mismatch, scrambled inference output, EKF ground-truth leakage, training-data class imbalance) were real and worth fixing — each was individually verified — and the CNN-GRU's own validation accuracy did genuinely improve (32.5 → ~24 km/h RMSE). But two further architecture experiments (mean-pooling the GRU output, adding accel/gyro-magnitude input channels) both looked plausible and both made the real drift metric *worse* despite looking neutral-to-positive on validation-set bin bias — while simply re-running the same config with a different random seed swung the result by more than either of those changes did. That combination (large training variance + a model that performs wildly inconsistently across different segments of the same trip: S1/S3a near 15-19%, S2/S4/Y1 over 150%) points to the CNN-GRU having hit a real accuracy ceiling on this training set and model size, not a remaining code bug or an easy architecture tweak. Closing the SIH gap from here most likely needs meaningfully more/more-diverse training data (more drivers, more road/vehicle types) or a different sensing approach entirely (e.g. fusing in wheel-speed-like signals), rather than continued tuning of this same architecture against this same dataset.
 
 ---
 

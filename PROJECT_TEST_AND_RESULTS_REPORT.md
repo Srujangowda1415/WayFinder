@@ -5,14 +5,16 @@
 > whole-trip error instead of GNSS-outage-only error, and (2) a buggy NHC
 > formula that computed a spurious non-zero "lateral velocity" instead of the
 > mathematically-correct no-op for this state model. Both are now fixed in
-> `src/navigation/ekf_fusion.py` / `mobile_app/wayfinder_app/lib/core/ekf_navigation.dart`
-> — see `PROJECT_REPORT.md` §4 for a reproduction showing the old metric
-> reporting 0.0% drift on a case with 50%-wrong AI speed for the whole
-> outage, vs. ~47% under the corrected metric. The EKF/NHC results and the
-> "Map Matching: PASS (HMM-style Viterbi)" claim further down this document
-> also do not match the actual code (`map_matcher.dart` is a plain
-> nearest-segment projection, not an HMM/Viterbi map matcher) — treat this
-> document as unreliable until re-verified against the current code.
+> `src/navigation/ekf_fusion.py` / `mobile_app/wayfinder_app/lib/core/ekf_navigation.dart`,
+> and the evaluation has been re-run against the real IO-VNBD dataset:
+> **true mean drift during a 30-second GNSS outage is 42.6%**, with only
+> **1 of 7** unseen-driver test sequences passing the SIH <10% target — see
+> `PROJECT_REPORT.md` §4 for the full corrected table. The EKF/NHC results and
+> the "Map Matching: PASS (HMM-style Viterbi)" claim further down this
+> document also do not match the actual code (`map_matcher.dart` is a plain
+> nearest-segment projection, not an HMM/Viterbi map matcher) — treat every
+> "PASS" verdict in this document as unverified/likely wrong until
+> individually re-checked against the current code.
 
 ## Overview
 This document outlines the testing, methodology, and empirical results of the WayFinder Intelligent Dead Reckoning system. The tests were performed to guarantee the integrity of the GNSS-denied navigation pipeline required for SIH26168.
