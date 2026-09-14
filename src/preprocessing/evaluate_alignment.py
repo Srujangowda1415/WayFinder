@@ -10,12 +10,13 @@ import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, '/Users/srujangowda/Desktop/WayFinder')
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 from src.preprocessing.loader import discover_sequences, load_sequence
 from src.preprocessing.alignment import estimate_alignment_matrix, apply_alignment
 
-DATA_ROOT = '/Users/srujangowda/Desktop/WayFinder/data/IO-VNBD-master'
-PLOTS_DIR = Path('/Users/srujangowda/Desktop/WayFinder/results/plots')
+DATA_ROOT = str(REPO_ROOT / 'data' / 'IO-VNBD-master')
+PLOTS_DIR = REPO_ROOT / 'results' / 'plots'
 PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 print("=" * 60)

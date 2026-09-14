@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.preprocessing.loader import (
     discover_sequences, load_sequence, haversine_m
 )
+from src.preprocessing.alignment import estimate_alignment_matrix, build_features
 
 # ─── TRAIN / VAL / TEST SPLIT ─────────────────────────────────────────────────
 # Trajectory-level split — NO temporal leakage.
@@ -60,15 +61,32 @@ def compute_normalization_stats(sequences: list) -> dict:
     for seq in sequences:
         try:
             vdf, sdf = load_sequence(seq)
-            
+
+            # accel_x/y/z, gyro_x/y/z, and the derived magnitude channels
+            # must be normalized the same way the model actually sees them
+            # at train/inference time: rotated into the vehicle frame via
+            # the single shared build_features() helper. Computing these
+            # stats separately (as before) is exactly how training and
+            # inference silently drifted apart previously.
+            raw_accel = sdf[['accel_x_ms2', 'accel_y_ms2', 'accel_z_ms2']].values
+            raw_gyro = sdf[['gyro_x_rads', 'gyro_y_rads', 'gyro_z_rads']].values
+            gt_speed = vdf['gps_velocity_ms'].values
+            R = estimate_alignment_matrix(raw_accel, gt_speed)
+            # include_magnitude=True so the (currently unused, see
+            # EXTRA_FEATURE_KEYS in alignment.py) derived-feature stats stay
+            # available if that experiment is revisited later.
+            built = build_features(raw_accel, raw_gyro, R, include_magnitude=True)
+
             # Features we'll normalize
             feats = {
-                'accel_x': sdf['accel_x_ms2'].values,
-                'accel_y': sdf['accel_y_ms2'].values,
-                'accel_z': sdf['accel_z_ms2'].values,
-                'gyro_x':  sdf['gyro_x_rads'].values,
-                'gyro_y':  sdf['gyro_y_rads'].values,
-                'gyro_z':  sdf['gyro_z_rads'].values,
+                'accel_x': built[:, 0],
+                'accel_y': built[:, 1],
+                'accel_z': built[:, 2],
+                'gyro_x':  built[:, 3],
+                'gyro_y':  built[:, 4],
+                'gyro_z':  built[:, 5],
+                'accel_horiz_mag': built[:, 6],
+                'gyro_mag': built[:, 7],
                 'mag_x':   sdf['mag_x_uT'].values,
                 'mag_y':   sdf['mag_y_uT'].values,
                 'mag_z':   sdf['mag_z_uT'].values,

@@ -117,9 +117,20 @@ def discover_sequences(data_root: str) -> list:
 
 
 def load_sequence(seq: dict) -> tuple:
-    """Load a sequence dict → (vdf, sdf)."""
+    """Load a sequence dict → (vdf, sdf).
+
+    The dataset calls V-file/S-file rows "synchronised", but a handful of
+    sequences are off by one row (see e.g. Vta01b, Vtb10). Every caller in
+    this codebase indexes vdf/sdf element-for-element assuming equal length,
+    so truncate both to the common length here, once, rather than let each
+    caller silently misalign or crash on the mismatched ones.
+    """
     vdf = load_v_file(seq['v_file'])
     sdf = load_s_file(seq['s_file'])
+    n = min(len(vdf), len(sdf))
+    if len(vdf) != len(sdf):
+        vdf = vdf.iloc[:n].reset_index(drop=True)
+        sdf = sdf.iloc[:n].reset_index(drop=True)
     return vdf, sdf
 
 
