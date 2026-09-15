@@ -2,6 +2,14 @@
 
 **Start here.** This is the current, accurate picture of what the system is, how it actually works, what it measurably does, and what is still broken or unverified. Written 2026-09-15 as a working reference for continued development.
 
+> **Update, same day:** the root cause behind §4.1 (straight line through turns
+> with GNSS off, real hardware) has been fixed and ported into the app — this
+> section previously described the gap between `tool/dr_replay.dart`'s
+> validated fixes and what actually shipped. See the end of §2, §4.1, and §5
+> for what changed: gravity-projected yaw rate, magnetometer health/hard-iron
+> calibration, GPS-course heading sync, route map matching re-enabled, and dead
+> alignment code removed.
+
 > **On the other 16 markdown files in this repo:** most predate the debugging work and contain claims that turned out to be false (the "0.2% drift / 100% pass" headline came from a chain of bugs). They carry correction banners now, but treat any number in them as suspect unless it also appears here. §7 says which docs are still worth reading.
 
 ---
@@ -21,24 +29,31 @@ The two halves implement the same EKF independently (`src/navigation/ekf_fusion.
 ## 2. How dead reckoning actually works now
 
 ### Drive mode, GNSS healthy
-GPS anchors position and speed into the EKF each fix. Roads for a ~2.5 km box are prefetched from Overpass and cached **in memory**. The EKF heading propagates from the gyro; it is *not* corrected against GPS course.
+GPS anchors position and speed into the EKF each fix. Roads for a ~2.5 km box are prefetched from Overpass and cached **in memory**. The EKF heading now also syncs to GPS course-over-ground (`p.heading`) whenever speed > 3 m/s — previously heading propagated from the gyro only and was never corrected against GPS course, so every outage started from whatever the gyro had already drifted to.
 
 ### Drive mode, GNSS lost
-Entered via the `📡 GNSS off` toggle, a >3 s GPS timeout, or (since this pass) a fix degrading past 25 m accuracy. On entry `_captureGnssAnchor()` snapshots the current speed. Then, every 100 ms:
+Entered via the `📡 GNSS off` toggle, a >3 s GPS timeout, or a fix degrading past 25 m accuracy. On entry `_captureGnssAnchor()` snapshots the current speed. Then, every 100 ms:
 
 1. **Stationary?** IMU-only detector (accel range < 0.5 m/s² over 2 s, mean near gravity, gyro < 0.1 rad/s, with 1.0 s hysteresis) → ZUPT, speed forced to 0.
 2. **Moving?** Speed = the value held from GNSS-loss. Not integrated from the accelerometer, not predicted by a model.
 3. **Road aiding** (if a road matched within 40 m and bearing agrees within 45°): heading ← road bearing, position snapped laterally onto the road.
-4. **Heading**: gyro yaw rate, plus a compass complementary pull — **skipped entirely when a road matched**, because the two fight each other.
-5. Predict → NHC → EMA smoothing onto the map marker.
+4. **Heading**: gravity-projected (mounting-independent) gyro yaw rate, plus a compass complementary pull — skipped when a road matched (the two fight each other) **and now also skipped whenever the magnetometer isn't `compassValid`** (unavailable, stalled, or not yet hard-iron calibrated). Previously an unconditional pull toward `_compassRad` meant a magnetometer that never fired even once left the compass frozen at 0 rad while still being trusted — a constant ~0.5 rad/s correction dragging heading back to north regardless of real turns. This was the confirmed root cause of the reported "straight line through turns with GNSS off" bug.
+5. Predict → NHC → EMA smoothing onto the map marker. Route-based map matching (`map_matcher.dart`) also runs here now when a route is set (see below).
 
 ### Walk mode
 Step detection (fixed 0.75 m stride along compass heading) moves the marker, and GNSS re-anchors it when healthy (EMA 0.2, hard snap beyond 25 m). PDR carries position when GNSS drops.
 
-### What is *not* in the path
-- **The CNN-GRU.** Removed. Still in the repo (`lib/core/speed_estimator.dart`, `assets/model_weights.json`) but never loaded.
-- **Route-based map matching.** `map_matcher.dart` exists but is hard-disabled at `navigation_service.dart` (`if (false && ...)`).
-- **The phone→vehicle alignment matrix.** `_alignR` is still computed but nothing reads it.
+### What changed in this pass
+- **Yaw rate is gravity-projected**, not the raw phone Z-gyro. `_vehYawRate` now projects the full gyro vector onto the measured gravity direction (`_onAccel`), so vehicle yaw is captured correctly regardless of phone mounting angle/tilt — previously only a phone lying flat with Z pointing up worked. Validated in `tool/dr_replay.dart` (`FIX_YAW`) before being ported; see also `test/ekf_navigation_test.dart`.
+- **Magnetometer health + hard-iron calibration.** `magHealthy` requires an event within the last 2 s (previously `_hasMag` latched true forever on the first-ever event). `compassValid` additionally requires each axis to have shown enough spread to trust an online-calibrated hard-iron offset. Only a `compassValid` compass is used for heading correction.
+- **GPS course-over-ground syncs EKF heading** while GNSS is healthy and moving (`_onGps`), and `heading_bias`'s process/initial noise was loosened (`ekf_navigation.dart`) so it can actually be learned from these updates instead of staying frozen near 0.
+- **Route-based map matching re-enabled** — the `if (false && ...)` hard-disable is gone; the existing GNSS-off/route-exists/confirmed-moving gate (§4.6, now resolved) already prevented it from inventing motion.
+- **Dead code removed:** the phone→vehicle alignment matrix (`_alignR`, `_rotateVec`, `_estimateAlignment`, `_alignAccelBuf`/`_alignSpeedBuf`) was computed but never applied to anything — gravity-projected yaw supersedes what it was meant to do. The write-only DR-anchor fields (`_drAnchorLat/Lon/HeadingRad`) are also gone.
+- **UI reads fused heading.** The map's heading-cone arrow and the "Head" stat now read `NavigationService.displayHeadingDeg` (the EKF state that actually drives position) instead of raw, possibly-stale compass output.
+- **Map:** `TileLayer.userAgentPackageName` corrected to the real application id (`com.wayfinder.wayfinder_app` — same mismatch class of bug as the drive-recorder path-fix below), added `RichAttributionWidget` (OSM/CARTO attribution, previously missing) and `errorTileCallback` so a failed tile can't blank the map.
+
+### What is *still not* in the path
+- **The CNN-GRU.** Removed. Still in the repo (`lib/core/speed_estimator.dart`, `assets/model_weights.json`) but never loaded — measured worse than hold-speed+ZUPT (§3), left as-is deliberately.
 
 ---
 
@@ -69,14 +84,14 @@ Two things this table encodes:
 
 ### P0 — these are what stand between the system and the target
 
-**4.1 Heading is the dominant error, and it is unvalidated on real hardware.**
-Replaying a recorded drive through the real Dart EKF: held speed stayed within 1.2 m/s of truth while heading drifted ~25°, and 428 m of travel at 25° is ~174 m cross-track — essentially the entire position error.
+**4.1 Heading is the dominant error — root cause found and fixed, confirmed on a real-hardware report.**
+A real on-device test (GNSS off, DR enabled) reproduced exactly the symptom this section predicted: the vehicle went straight through turns, and the report specifically named the magnetometer as not working. Reading the actual pipeline turned up two concrete, confirmed bugs (not a sensor-quality unknown):
+1. `_vehYawRate = _gz` used the raw phone Z-gyro, which is only the vehicle's yaw axis when the phone lies flat. **Fixed** — it's now gravity-projected (see §2), mounting-independent, and covered by `test/ekf_navigation_test.dart`.
+2. `_hasMag` latched `true` forever on the first-ever magnetometer event and was never re-checked, so a magnetometer that stalled or never fired left `_compassRad` frozen at its initial value (0 rad) — while the DR path *unconditionally* pulled heading toward it every 100 ms whenever no road was matched. A constant ~0.5 rad/s pull toward a frozen "north" reading exactly reproduces "goes straight regardless of real turns." **Fixed** — heading correction now requires `compassValid` (§2).
 
-In IO-VNBD the phone gyro simply does not capture vehicle yaw: correlation **+0.04** against truth, magnitude **7× too small**, while the car's ECU sensor scores **−0.997**. No axis worked, and a gravity-projected (mounting-independent) yaw rate did not help either.
+The IO-VNBD finding below is a separate, still-open question — it does not explain the reported bug (that dataset issue would make DR *bad*, not specifically *straight*), but it's worth keeping distinct:
 
-**Whether *your* phone is better is unknown and untested.** Modern phone gyros are generally good; this looks like a dataset logging limitation. This is the single highest-value thing to measure next. `tool/dr_replay.dart` plus a recorded drive answers it in ~10 minutes.
-
-Related: `_vehYawRate = _gz` uses the **raw phone Z-gyro**, which is only the vehicle's yaw axis when the phone lies flat. `_alignR` exists and could rotate the gyro into the vehicle frame, but nothing uses it — and it never did, even before the ML removal.
+In IO-VNBD the phone gyro simply does not capture vehicle yaw: correlation **+0.04** against truth, magnitude **7× too small**, while the car's ECU sensor scores **−0.997**. No axis worked, and a gravity-projected yaw rate did not help either — this looks like a dataset logging limitation specific to that recording rig, not a general phone-gyro problem, but **whether *your* phone is better is still worth confirming** with `tool/dr_replay.dart` against a recording from the actual test device.
 
 **4.2 OSM matching locks onto the wrong parallel road.**
 Greedy nearest-segment matching, even with bearing gating, snapped at **0 m distance while being 288 m wrong** in one test window. Bearing gating rejects crossing roads but not parallel ones (dual carriageways, service roads). This is why OSM helped in 3 of 7 windows rather than all.
@@ -91,13 +106,11 @@ The fix is proper HMM/Viterbi matching with transition continuity — candidate 
 
 **4.5 Held speed goes stale.** It is exact at outage onset and degrades as the vehicle accelerates or brakes. This is the fundamental limit of the current speed approach; accelerometer integration was measured *worse* (bias compounds quadratically into position over 30 s).
 
-**4.6 Route-based map matching is still disabled.** When a destination is set, snapping to the known OSRM route has no wrong-parallel-road ambiguity and would be more reliable than free OSM matching. Deliberately left off to avoid re-introducing an old "fake motion while stationary" bug, but it is low-hanging fruit — gate it on `!_confirmedStationary` as the road matcher already is.
+**4.6 Route-based map matching — fixed, re-enabled.** The `if (false && ...)` hard-disable is gone. The gate was already correct (`!_confirmedStationary` etc.) and needed no changes.
 
 ### P2 — correctness and maintenance debt
 
-**4.7 Dead code from the ML removal.** `_rotateVec` (unused), `_alignR` / `_alignSpeedBuf` / `_drAnchorLat` / `_drAnchorLon` / `_drAnchorHeadingRad` / `_lastCompassRad` (all write-only). 75 analyzer warnings, 0 errors.
-
-**4.8 Latent bug in dead code:** `_alignSpeedBuf.add(_gpsLat)` appends a *latitude* to a buffer named for speeds. Harmless only because nothing reads it.
+**4.7 Dead code from the ML removal — fixed, removed.** `_rotateVec`, `_alignR`, `_alignAccelBuf`/`_alignSpeedBuf`, `_estimateAlignment`, and the write-only `_drAnchorLat`/`_drAnchorLon`/`_drAnchorHeadingRad`/`_lastCompassRad` are all gone (gravity-projected yaw supersedes what the alignment matrix was meant to do). 64 analyzer warnings remain (pre-existing style/lint items, e.g. non-camelCase matrix variable names, `avoid_print` in `DRIVE_TRACE` logging), 0 errors.
 
 **4.9 The CNN-GRU can't simply be switched back on.** Re-enabling needs *both* the `load()` call restored *and* `assets/model_weights.json` + `norm_stats.json` declared under `assets:` in `pubspec.yaml` — the missing declaration is why it never worked in the first place.
 
@@ -127,6 +140,11 @@ Useful context, because several were invisible and could regress:
 - `EKF_INS.predict()` **leaked ground-truth GPS speed** into the "GNSS-denied" simulation.
 - Walk mode **never re-anchored to GPS** after the first fix.
 - The drift metric measured **whole-trip** error rather than outage error.
+- `_vehYawRate` used the **raw phone Z-gyro** instead of a gravity-projected (mounting-independent) yaw rate — broke on any phone mount that wasn't flat. Fixed and unit-tested (§4.1, §2).
+- The magnetometer had **no availability/staleness check**, so a stalled or never-fired sensor left the compass frozen while a DR-path correction unconditionally pulled heading toward it — the confirmed cause of a real-hardware "goes straight through turns" report. Fixed with `magHealthy`/`compassValid` gating and online hard-iron calibration (§4.1, §2).
+- GPS course-over-ground was **never fed into the EKF** while GNSS was healthy, so heading (and `heading_bias`) entered every outage uncorrected. Fixed (§2).
+- Route-based map matching was hard-disabled (`if (false && ...)`) despite the safety gate already being correct. Re-enabled (§4.6).
+- The map's tile `userAgentPackageName` didn't match the app's real Android application id (the same class of bug as the drive-recorder path fix above).
 
 ---
 
@@ -137,7 +155,8 @@ export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools
 
 # app
 cd mobile_app/wayfinder_app
-flutter analyze lib                  # expect 0 errors, ~75 warnings
+flutter analyze lib                  # expect 0 errors, ~64 warnings/infos (pre-existing style debt)
+flutter test                         # EKF/gravity-projected-yaw unit tests (test/ekf_navigation_test.dart)
 flutter build apk --release && adb install -r build/app/outputs/flutter-apk/app-release.apk
 
 # regenerate the launcher icon
@@ -170,7 +189,7 @@ Live debugging: `adb logcat | grep DRIVE_TRACE` prints held velocity, ZUPT state
 | `DATA_COLLECTION_PLAN.md` / `DATASET_PROTOCOL.md` | Current. What data to collect and how to split it without leakage. |
 | `PROJECT_REPORT.md` | Corrected but legacy. §4 has the real numbers; earlier sections are historical. |
 | `PROJECT_STATUS.md` | Corrected banner, body outdated. |
-| `PROJECT_TEST_AND_RESULTS_REPORT.md` | **Unreliable.** Self-contradictory; claims features that do not exist (e.g. "HMM Viterbi map matching" — `map_matcher.dart` is a plain nearest-segment projection, and disabled). |
+| `PROJECT_TEST_AND_RESULTS_REPORT.md` | **Unreliable.** Self-contradictory; claims features that do not exist (e.g. "HMM Viterbi map matching" — `map_matcher.dart` is a plain nearest-segment projection; it is enabled again as of this pass, but is still not HMM/Viterbi). |
 | `PROJECT_FINAL_AUDIT.md`, `PROJECT_ARCHITECTURE_AUDIT.md`, `DRIVE_MODE_*.md`, `DR_AI_INTEGRATION.md`, `MODEL_EVALUATION.md`, `CNN_GRU_DIAGNOSTIC_REPORT.md`, `CLEANUP_REPORT.md` | Historical. Describe states the code has since left. `CNN_GRU_DIAGNOSTIC_REPORT.md` is still technically sound on the model itself. |
 
 Consolidating or deleting the historical set would be a real improvement — their main cost is that a reader cannot tell which describes reality.
@@ -179,6 +198,6 @@ Consolidating or deleting the historical set would be a real improvement — the
 
 ## 8. If you only do three things next
 
-1. **Record a 10-minute drive and replay it.** Answers whether your phone's gyro tracks yaw (§4.1) — the question everything else depends on. The recorder works now; `tool/dr_replay.dart` takes it from there.
+1. **Drive-test the fix.** GNSS ON → OFF → straight → turn → stop → turn → ON → OFF, watching `adb logcat | grep DRIVE_TRACE` (now also prints `compassValid`/`magHealthy` and live heading) and the map. Confirms §4.1's fix holds on your actual device/mount, not just in replay.
 2. **Make road matching sticky** (§4.2). Prefer the previously matched way; only switch when a candidate is clearly better. Cheapest large win available.
 3. **Persist the OSM cache to disk** (§4.3), so aiding survives an app restart and works outside the prefetched box.

@@ -60,8 +60,15 @@ class EKFNavigation {
             180.0 *
             math.cos(lat0 * math.pi / 180.0),
         _x = [0.0, 0.0, initHeading, initSpeed, 0.0, 0.0],
-        _P = _diagMatrix(6, [100.0, 100.0, 0.1, 4.0, 1e-6, 0.25]),
-        _Q = _diagMatrix(6, [0.01, 0.01, 1e-4, 0.01, 1e-8, 1e-6]);
+        // heading_bias P0/Q were 1e-6/1e-8 — tight enough that the state was
+        // effectively frozen at 0 regardless of measurements. Now that GPS
+        // course-over-ground and road-bearing updates correct heading
+        // directly (see NavigationService._onGps / _fuse), the bias state
+        // needs enough freedom to actually absorb the phone gyro's real
+        // bias via those updates' cross-covariance, so it is already learned
+        // by the time a GNSS outage starts.
+        _P = _diagMatrix(6, [100.0, 100.0, 0.1, 4.0, 1e-4, 0.25]),
+        _Q = _diagMatrix(6, [0.01, 0.01, 1e-4, 0.01, 1e-6, 1e-6]);
 
   /// Propagate state by one timestep.
   void predict(double dt, double yawRate) {

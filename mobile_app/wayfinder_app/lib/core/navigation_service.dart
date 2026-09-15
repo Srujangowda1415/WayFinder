@@ -55,11 +55,6 @@ class NavigationService extends ChangeNotifier {
   double pdrLat = 12.9716;
   double pdrLon = 77.5946;
 
-  // ── Last known GNSS state (DR anchor) ─────────────────────────────────────
-  double _drAnchorLat = 12.9716;
-  double _drAnchorLon = 77.5946;
-  double _drAnchorHeadingRad = 0;
-
   // ── Speed estimation during GNSS outage ───────────────────────────────────
   // NOTE (2026-09-15): the CNN-GRU speed estimator is NO LONGER in the
   // navigation path. Measured on both the validation and test driver splits,
@@ -86,12 +81,6 @@ class NavigationService extends ChangeNotifier {
   bool get roadAidActive => _roadAidActive;
   int  get roadSegmentCount => _roads.segmentCount;
 
-  // Alignment matrix (phone → vehicle frame), estimated online from GPS accel
-  List<List<double>> _alignR = [[1,0,0],[0,1,0],[0,0,1]];
-  bool _alignDone = false;
-  final List<List<double>> _alignAccelBuf = [];  // raw accel samples (for alignment)
-  final List<double>       _alignSpeedBuf = [];  // GPS speeds (for forward detection)
-
   // ── Motion Detection (always-running, independent of GNSS) ────────────────
   // Circular buffer of recent accel magnitudes at 10 Hz.
   // Used to determine STATIONARY vs MOVING using temporal consistency.
@@ -115,8 +104,32 @@ class NavigationService extends ChangeNotifier {
 
   // ── Compass ────────────────────────────────────────────────────────────────
   double _compassRad = 0;
-  double? _lastCompassRad;
   double headingDeg  = 0;
+
+  // Magnetometer availability: `_hasMag` used to latch true forever on the
+  // first-ever event, so a sensor that stalled mid-session (or never fired
+  // at all, matching a real on-device report) left `_compassRad` frozen at
+  // its initial value while still being trusted as live. Track recency
+  // instead, and expose it so the DR heading logic (and the UI) can tell
+  // when the compass is not to be trusted.
+  DateTime? _lastMagEventTime;
+  bool get magHealthy =>
+      _hasMag &&
+      _lastMagEventTime != null &&
+      DateTime.now().difference(_lastMagEventTime!) < const Duration(seconds: 2);
+
+  // Online hard-iron calibration: a vehicle cabin's ferrous/electrical field
+  // biases the raw magnetometer by tens of degrees. Track the running
+  // per-axis extremes and subtract their midpoint before use. Starts at zero
+  // offset (today's uncalibrated behaviour) and only improves — no
+  // regression risk versus using the raw field.
+  double? _magMinX, _magMaxX, _magMinY, _magMaxY, _magMinZ, _magMaxZ;
+  static const double _magMinSpanUt = 5.0;
+  bool get compassValid =>
+      magHealthy &&
+      _magMaxX != null && (_magMaxX! - _magMinX!) > _magMinSpanUt &&
+      (_magMaxY! - _magMinY!) > _magMinSpanUt &&
+      (_magMaxZ! - _magMinZ!) > _magMinSpanUt;
 
   // ── IMU raw ────────────────────────────────────────────────────────────────
   double _ax = 0, _ay = 0, _az = 9.81;
@@ -144,6 +157,14 @@ class NavigationService extends ChangeNotifier {
   DateTime? _startTime;
 
   // ── Metrics ────────────────────────────────────────────────────────────────
+  // Fused heading (EKF state) — this is what actually drives position
+  // propagation. `headingDeg` (raw compass) used to be shown directly in the
+  // UI, so whenever the magnetometer was unavailable/stale the on-screen
+  // arrow and heading readout looked frozen or wrong even while the vehicle
+  // (and the underlying EKF state) was genuinely turning. Fall back to the
+  // raw compass only before the EKF has ever produced a state.
+  double get displayHeadingDeg =>
+      currentState != null ? currentState!.heading * 180.0 / math.pi : headingDeg;
   double get speedKmh        => (navMode == NavMode.walking ? _pdrSpeedMs : _mlSpeedMs) * 3.6;
   double get vibrationScore  => _mlVibrationScore;
   double get totalDistanceKm => _totalDistM / 1000;
@@ -265,8 +286,8 @@ class NavigationService extends ChangeNotifier {
     }
     if (initStatus == InitStatus.loading) initStatus = InitStatus.ipLocated;
 
-    pdrLat = _drAnchorLat = lat;
-    pdrLon = _drAnchorLon = lon;
+    pdrLat = lat;
+    pdrLon = lon;
     initCity = city;
     _initEKF(lat, lon, 0, 0);
     notifyListeners();
@@ -361,28 +382,27 @@ class NavigationService extends ChangeNotifier {
     _ax = e.x; _ay = e.y; _az = e.z;
     _updateCompass();
 
-    // Collect alignment data while GNSS is valid (for alignment matrix estimation)
-    if (_hasGps && !gnssSimDenied && gnssStatus == GnssStatus.active) {
-      _alignAccelBuf.add([_ax, _ay, _az]);
-      _alignSpeedBuf.add(_gpsLat);
-      if (_alignAccelBuf.length > 500) _alignAccelBuf.removeAt(0);
-    }
-
     // Always update motion detection buffer (works in GNSS and DR mode)
     final aMag = math.sqrt(_ax*_ax + _ay*_ay + _az*_az);
     _motionAccelMags.add(aMag);
     if (_motionAccelMags.length > _motionBufSize) _motionAccelMags.removeAt(0);
 
-    // Yaw rate for the EKF heading propagation. MUST be updated on every
-    // accelerometer event, unconditionally.
+    // Yaw rate for the EKF heading propagation, projected onto the measured
+    // gravity direction rather than taken as the raw phone-frame Z-gyro.
     //
-    // This was previously nested inside `if (_speedModel.isLoaded)`, together
-    // with the (now removed) ML sample push. The model's weights were never
-    // declared as assets in pubspec.yaml, so it never loaded, so this line
-    // never ran and _vehYawRate stayed 0 for the entire session — meaning the
-    // EKF's gyro heading propagation was dead and heading came only from the
-    // compass complementary term. See PROTOTYPE_STATUS.md.
-    _vehYawRate = _gz; // raw phone Z gyro for yaw rate
+    // The raw Z-gyro is only the vehicle's yaw axis when the phone lies flat
+    // with its screen up. Any other mount angle (tilted dash mount,
+    // landscape holder, phone in a pocket) attenuates or drops the turn
+    // signal entirely — the phone still measures the real-world rotation,
+    // just partly on its X/Y axes instead of Z. Projecting the full gyro
+    // vector onto gravity ("down") isolates rotation about the true vertical
+    // (world yaw) axis regardless of how the phone is mounted, which is what
+    // the never-applied `_alignR` matrix was meant to achieve but didn't.
+    // Validated in tool/dr_replay.dart (FIX_YAW) before being ported here.
+    final gNorm = math.sqrt(_ax*_ax + _ay*_ay + _az*_az);
+    _vehYawRate = gNorm > 0.5
+        ? -(_gx*_ax + _gy*_ay + _gz*_az) / gNorm
+        : _gz; // degenerate free-fall/clipped sample: fall back to raw Z
 
     if (navMode == NavMode.walking && _running) _detectStep();
   }
@@ -431,14 +451,31 @@ class NavigationService extends ChangeNotifier {
   void _onMag(MagnetometerEvent e) {
     _mx = e.x; _my = e.y; _mz = e.z;
     _hasMag = true;
+    _lastMagEventTime = DateTime.now();
+
+    // Online hard-iron calibration: widen the running per-axis extremes.
+    // Offset = midpoint of observed range. Cheap and adapts to whatever
+    // ferrous/electrical field the phone currently sits in (dash mount,
+    // pocket, cup holder), rather than assuming a lab-calibrated sensor.
+    _magMinX = _magMinX == null ? _mx : math.min(_magMinX!, _mx);
+    _magMaxX = _magMaxX == null ? _mx : math.max(_magMaxX!, _mx);
+    _magMinY = _magMinY == null ? _my : math.min(_magMinY!, _my);
+    _magMaxY = _magMaxY == null ? _my : math.max(_magMaxY!, _my);
+    _magMinZ = _magMinZ == null ? _mz : math.min(_magMinZ!, _mz);
+    _magMaxZ = _magMaxZ == null ? _mz : math.max(_magMaxZ!, _mz);
+
     _updateCompass();
   }
 
-  /// Tilt-compensated compass (Accel + Mag → azimuth)
+  /// Tilt-compensated compass (Accel + Mag → azimuth), hard-iron corrected.
   void _updateCompass() {
     if (!_hasMag) return;
     final aMag = math.sqrt(_ax*_ax + _ay*_ay + _az*_az);
     if (aMag < 0.5) return;
+
+    final mxCal = _magMaxX != null ? _mx - (_magMaxX! + _magMinX!) / 2 : _mx;
+    final myCal = _magMaxY != null ? _my - (_magMaxY! + _magMinY!) / 2 : _my;
+    final mzCal = _magMaxZ != null ? _mz - (_magMaxZ! + _magMinZ!) / 2 : _mz;
 
     final axN = _ax / aMag, ayN = _ay / aMag, azN = _az / aMag;
     final pitch = math.asin(-axN.clamp(-1.0, 1.0));
@@ -446,8 +483,8 @@ class NavigationService extends ChangeNotifier {
     final cp = math.cos(pitch), sp = math.sin(pitch);
     final cr = math.cos(roll),  sr = math.sin(roll);
 
-    final xH = _mx * cp + _my * sr * sp + _mz * cr * sp;
-    final yH = _my * cr - _mz * sr;
+    final xH = mxCal * cp + myCal * sr * sp + mzCal * cr * sp;
+    final yH = myCal * cr - mzCal * sr;
 
     double h = math.atan2(-yH, xH);
     if (h < 0) h += 2 * math.pi;
@@ -519,16 +556,18 @@ class NavigationService extends ChangeNotifier {
       // Let pdrLat/pdrLon gracefully catch up to EKF state via EMA in _fuse
       // instead of violently snapping them here.
 
-      // Save as DR anchor (used when GPS drops)
-      _drAnchorLat = p.latitude;
-      _drAnchorLon = p.longitude;
-      _drAnchorHeadingRad = _compassRad;
-
       drPhase = DrPhase.gnssNavigation;
 
-      // Compute alignment matrix once we have enough data
-      if (!_alignDone && _alignAccelBuf.length >= 200) {
-        _estimateAlignment(p.speed);
+      // GPS course-over-ground → EKF heading sync. This is the one reliable
+      // absolute heading reference available while GNSS is healthy — course
+      // is only meaningful once the vehicle is actually moving in a straight
+      // enough line to be measured (Geolocator reports -1 when unknown), so
+      // gate on speed. Without this the EKF heading state is driven only by
+      // gyro-integration + NHC and enters every GNSS outage already
+      // uncorrected, which is the dominant source of DR position error.
+      // Validated in tool/dr_replay.dart (FIX_HDG) before being ported here.
+      if (p.speed > 3.0 && p.heading >= 0 && p.heading.isFinite) {
+        _ekf!.updateHeading(p.heading * math.pi / 180.0, variance: 0.05);
       }
 
       // Prefetch the surrounding road network WHILE GNSS is healthy, so that
@@ -559,11 +598,6 @@ class NavigationService extends ChangeNotifier {
   }
 
   void _captureGnssAnchor() {
-    // Freeze DR anchor at the current reliable position
-    _drAnchorLat = pdrLat;
-    _drAnchorLon = pdrLon;
-    _drAnchorHeadingRad = _compassRad;
-
     // Capture the speed we were travelling at the instant GNSS was lost.
     // This is the seed for dead reckoning: a 30s outage is a bounded
     // velocity-propagation problem from a KNOWN initial speed, not an
@@ -574,50 +608,6 @@ class NavigationService extends ChangeNotifier {
 
     drPhase = DrPhase.deadReckoning;
   }
-
-  // ── Simple online alignment estimation ───────────────────────────────────
-  void _estimateAlignment(double gpsSpeed) {
-    if (_alignAccelBuf.isEmpty) return;
-
-    // Down vector = mean gravity
-    final n = _alignAccelBuf.length;
-    final down = [
-      _alignAccelBuf.map((a) => a[0]).reduce((a, b) => a + b) / n,
-      _alignAccelBuf.map((a) => a[1]).reduce((a, b) => a + b) / n,
-      _alignAccelBuf.map((a) => a[2]).reduce((a, b) => a + b) / n,
-    ];
-    final dMag = math.sqrt(down[0]*down[0] + down[1]*down[1] + down[2]*down[2]);
-    final zVec = down.map((d) => d / dMag).toList();
-
-    // Forward vector ≈ [0, 1, 0] in phone portrait — use compass heading to rotate
-    // Simple heuristic: x_vehicle is the horizontal direction of travel
-    final ch = math.cos(_compassRad), sh = math.sin(_compassRad);
-    var xVec = [sh, ch, 0.0];  // North-aligned horizontal forward
-
-    // Orthogonalise xVec against zVec
-    final dot = xVec[0]*zVec[0] + xVec[1]*zVec[1] + xVec[2]*zVec[2];
-    xVec = [xVec[0] - dot*zVec[0], xVec[1] - dot*zVec[1], xVec[2] - dot*zVec[2]];
-    final xMag = math.sqrt(xVec[0]*xVec[0] + xVec[1]*xVec[1] + xVec[2]*xVec[2]);
-    if (xMag < 1e-6) return;
-    xVec = xVec.map((v) => v / xMag).toList();
-
-    // y = z × x
-    final yVec = [
-      zVec[1]*xVec[2] - zVec[2]*xVec[1],
-      zVec[2]*xVec[0] - zVec[0]*xVec[2],
-      zVec[0]*xVec[1] - zVec[1]*xVec[0],
-    ];
-
-    _alignR = [xVec, yVec, zVec];
-    _alignDone = true;
-  }
-
-  List<double> _rotateVec(List<double> v, List<List<double>> R) =>
-      [
-        R[0][0]*v[0] + R[0][1]*v[1] + R[0][2]*v[2],
-        R[1][0]*v[0] + R[1][1]*v[1] + R[1][2]*v[2],
-        R[2][0]*v[0] + R[2][1]*v[1] + R[2][2]*v[2],
-      ];
 
   // ══════════════════════════════════════════════════════════════════════════
   // FUSION LOOP (10 Hz)
@@ -716,10 +706,6 @@ class NavigationService extends ChangeNotifier {
           // 43.8% vs 33.3% mean drift on test), so the forward accelerometer
           // is deliberately NOT integrated here.
           //
-          // Unlike the old ML path this has no dependency on _alignDone, so
-          // dead reckoning now works immediately on GNSS loss instead of
-          // freezing the marker whenever phone→vehicle alignment had not yet
-          // converged.
           validatedSpeed = _drHoldSpeedMs;
           _mlSpeedMs = validatedSpeed;
           // Moderate confidence: right at outage onset this is essentially a
@@ -760,8 +746,19 @@ class NavigationService extends ChangeNotifier {
         // WORSE, not better — measured in replay, the compass term dragged
         // the heading straight back off the road (187 m vs 173 m error).
         // Road wins when available; compass is the fallback.
+        //
+        // Also SKIPPED whenever the compass is not `compassValid` (sensor
+        // stalled/never fired, or not yet hard-iron calibrated). This used
+        // to pull unconditionally toward `_compassRad`, which — if the
+        // magnetometer had never delivered a single event — stayed frozen at
+        // its initial value (0 rad, due north) for the entire session. That
+        // silently turned into a constant ~0.5 rad/s correction fighting any
+        // real turn back toward north, i.e. exactly a straight-line-through-
+        // turns bug. With no trustworthy compass, pure gyro-integrated
+        // heading (now gravity-projected, see _onAccel) is strictly better
+        // than pulling toward a stale or uncalibrated reading.
         double correctedYawRate = _vehYawRate;
-        if (!_roadAidActive) {
+        if (!_roadAidActive && compassValid) {
           double hErr = _compassRad - _ekf!.state.heading;
           while (hErr >  math.pi) hErr -= 2 * math.pi;
           while (hErr < -math.pi) hErr += 2 * math.pi;
@@ -791,7 +788,7 @@ class NavigationService extends ChangeNotifier {
       //   c) The vehicle is confirmed moving (speed > threshold)
       // This prevents snapping to a road when stationary and making the
       // marker appear to travel along the road.
-      if (false && !gnssOn && routePoints.isNotEmpty && !_confirmedStationary && _mlSpeedMs > 0.5) {
+      if (!gnssOn && routePoints.isNotEmpty && !_confirmedStationary && _mlSpeedMs > 0.5) {
         final snapped = MapMatcher.snapToRoute(
           LatLng(targetLat, targetLon),
           routePoints,
@@ -842,7 +839,7 @@ class NavigationService extends ChangeNotifier {
         print("[DRIVE_TRACE] map-matched position: [$targetLat, $targetLon]");
         print("[DRIVE_TRACE] final marker position: [$pdrLat, $pdrLon]");
         print("[DRIVE_TRACE] marker delta: [${pdrLat - oldPdrLat}, ${pdrLon - oldPdrLon}]");
-        print("[DRIVE_TRACE] source/component: $updateSource | alignDone: $_alignDone");
+        print("[DRIVE_TRACE] source/component: $updateSource | compassValid: $compassValid (magHealthy: $magHealthy) | heading: ${(_ekf!.state.heading * 180 / math.pi).toStringAsFixed(1)}deg");
         print("[DRIVE_TRACE] ------------------------------------------------");
       }
 

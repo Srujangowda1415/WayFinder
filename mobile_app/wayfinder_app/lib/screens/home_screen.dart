@@ -130,11 +130,22 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         onTap: (_, __) { setState(() => _mapFollowUser = false); _searchFocus.unfocus(); },
       ),
       children: [
-        // Dark base tiles
+        // OSM-derived dark base tiles (CARTO Dark Matter — CARTO basemaps are
+        // rendered directly from OpenStreetMap data, so road geometry tracks
+        // OSM exactly, which is what road_matcher.dart matches against).
+        // userAgentPackageName was previously 'com.wayfinder.app', which is
+        // NOT this app's actual application id (see android/app/build.gradle.kts
+        // — the same com.wayfinder.app / com.wayfinder.wayfinder_app mismatch
+        // already broke drive recording once; fixed here too, since tile
+        // providers rate-limit/attribute by user agent).
         TileLayer(
           urlTemplate: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
           subdomains: const ['a', 'b', 'c', 'd'],
-          userAgentPackageName: 'com.wayfinder.app',
+          userAgentPackageName: 'com.wayfinder.wayfinder_app',
+          maxNativeZoom: 20,
+          // A failed/blocked tile must not blank the map — keep showing
+          // whatever was last rendered underneath instead of an error tile.
+          errorTileCallback: (tile, error, stackTrace) {},
         ),
 
         // Route
@@ -180,6 +191,18 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               child: const Icon(Icons.location_pin, color: Color(0xFFEA4335), size: 42),
             ),
           ]),
+
+        // Attribution — required by both OSM's and CARTO's terms of use for
+        // the basemap data/tiles above; was missing entirely before.
+        RichAttributionWidget(
+          alignment: AttributionAlignment.bottomLeft,
+          attributions: [
+            TextSourceAttribution(
+              '© OpenStreetMap contributors, © CARTO',
+              onTap: () {},
+            ),
+          ],
+        ),
       ],
     );
   }
@@ -202,7 +225,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           ),
           // Heading cone
           Transform.rotate(
-            angle: nav.headingDeg * math.pi / 180,
+            angle: nav.displayHeadingDeg * math.pi / 180,
             child: CustomPaint(size: const Size(44, 44), painter: _HeadingCone()),
           ),
           // Blue dot
@@ -492,7 +515,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                 const SizedBox(width: 16),
                 Expanded(
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    _statLabel('${nav.headingDeg.toStringAsFixed(0)}° ${_cardinal(nav.headingDeg)}', 'Head'),
+                    _statLabel('${nav.displayHeadingDeg.toStringAsFixed(0)}° ${_cardinal(nav.displayHeadingDeg)}', 'Head'),
                     const SizedBox(height: 4),
                     _statLabel('${nav.stepCount}', 'Steps'),
                   ]),
