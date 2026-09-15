@@ -1,5 +1,9 @@
 # WayFinder — Project Status
 
+> **📖 START HERE: `ENGINEERING_REFERENCE.md`** — current architecture, measured
+> performance by configuration, and the open-issues list. This file is retained
+> for history; its body predates the debugging work.
+
 > **🚀 CURRENT STATE FOR SIH: see `PROTOTYPE_STATUS.md`.** The CNN-GRU has
 > been removed from the navigation path and replaced with "hold the speed we
 > had when GPS dropped + ZUPT", which measured roughly half the position
