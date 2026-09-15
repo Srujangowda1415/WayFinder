@@ -142,10 +142,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           urlTemplate: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
           subdomains: const ['a', 'b', 'c', 'd'],
           userAgentPackageName: 'com.wayfinder.wayfinder_app',
-          maxNativeZoom: 20,
-          // A failed/blocked tile must not blank the map — keep showing
-          // whatever was last rendered underneath instead of an error tile.
-          errorTileCallback: (tile, error, stackTrace) {},
         ),
 
         // Route
@@ -193,15 +189,13 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           ]),
 
         // Attribution — required by both OSM's and CARTO's terms of use for
-        // the basemap data/tiles above; was missing entirely before.
-        RichAttributionWidget(
-          alignment: AttributionAlignment.bottomLeft,
-          attributions: [
-            TextSourceAttribution(
-              '© OpenStreetMap contributors, © CARTO',
-              onTap: () {},
-            ),
-          ],
+        // the basemap data/tiles above; was missing entirely before. Uses the
+        // simple, stateless attribution widget rather than the animated
+        // RichAttributionWidget — lower surface area, nothing to go wrong.
+        SimpleAttributionWidget(
+          source: const Text('OpenStreetMap contributors, © CARTO'),
+          alignment: Alignment.bottomLeft,
+          backgroundColor: const Color(0x991C2030),
         ),
       ],
     );
